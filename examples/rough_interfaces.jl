@@ -167,7 +167,7 @@ begin
 
     u, λ_final = solve_volume_constrained(
         energy_fn, gradient_fn!, volume_fn, vol_grad, u0, vol_target;
-        tol_h = 1e-7, verbose = false)
+        contact = vec(overlap), tol_h = 1e-7, verbose = false)
 
     V_fin = compute_volume(u, gap, l)
     E_fin = phase_field_energy(u, gap, ε, l, σ, C_σ)
@@ -187,16 +187,23 @@ end
 
 # ╔═╡ 90918734-e422-25ba-aefa-db0f7a0333b1
 begin
-    u_in_contact = copy(u_mat)
-    u_in_contact[.!overlap] .= NaN
+    # Build a two-section colormap:
+    #   u ∈ [0, 1]  →  full viridis  (data range maps to clims [0, 2] lower half)
+    #   contact = 2.0  →  red        (clims upper half, never occupied by real data)
+    viridis_g  = cgrad(:viridis)
+    n_v        = 256
+    pf_colors  = convert.(RGB{Float64}, [viridis_g[t] for t in range(0.0, 1.0; length=n_v)])
+    push!(pf_colors, RGB(0.85, 0.15, 0.1))
+    pf_cmap    = cgrad(pf_colors, vcat(collect(range(0.0, 0.5; length=n_v)), [1.0]))
 
-    p_pf = heatmap(x_coords, y_coords, u_mat', aspect_ratio=:equal,
-                   title="Phase-field u", color=:viridis, clims=(0, 1),
-                   xlabel="x", ylabel="y")
-    p_contact_pf = heatmap(x_coords, y_coords, u_in_contact', aspect_ratio=:equal,
-                           title="Phase-field u in contact region", color=:viridis,
-                           clims=(0, 1), xlabel="x", ylabel="y")
-    plot(p_pf, p_contact_pf, layout=(1, 2), size=(1200, 500))
+    u_display           = copy(u_mat)
+    u_display[overlap] .= 2.0
+
+    heatmap(x_coords, y_coords, u_display',
+            color=pf_cmap, clims=(0.0, 2.0),
+            aspect_ratio=:equal, colorbar=false,
+            title="Phase-field u (red = contact region)",
+            xlabel="x", ylabel="y")
 end
 
 # ╔═╡ 90918734-901b-0e54-fc66-6466bfa2df0b

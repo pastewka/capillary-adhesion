@@ -263,5 +263,63 @@ using Statistics
         end
     end
 
+    @testset "Contact region: phase field vanishes, volume constraint satisfied" begin
+        # A central rectangular patch has gap = 0 (plates in contact).
+        # The solver must hold u = 0 there (via the `contact` keyword) and still
+        # satisfy the global volume constraint over the open-gap region.
+        # Checked for both hydrophilic (σ < 0) and hydrophobic (σ > 0) wetting.
+        N  = 32
+        l  = 1.0 / N
+        ε  = 4.0 * l
+        z  = 10.0 * l
+
+        # Central 16×16 contact patch (half the domain in each direction)
+        g = fill(z, N, N)
+        r  = N ÷ 4        # half-width of the square contact region
+        ic = N ÷ 2
+        g[ic-r+1:ic+r, ic-r+1:ic+r] .= 0.0
+        contact = vec(g .== 0.0)
+
+        vol_max  = compute_volume(ones(N * N), g, l)
+        vol_grad = compute_volume_gradient(g, l)
+
+        # Stripe initial condition at 50 % fill over the whole domain
+        u0 = let
+            u_tmp = Matrix{Float64}(undef, N, N)
+            x_mid = 0.5 * N * l
+            for j in 1:N, i in 1:N
+                x = (i - 0.5) * l
+                u_tmp[i, j] = 0.5 * (1.0 + tanh((x_mid - x) / ε))
+            end
+            vec(u_tmp)
+        end
+
+        for (θ_deg, label) in [(60, "hydrophilic θ=60°"), (120, "hydrophobic θ=120°")]
+            @testset "$label" begin
+                σ_val  = -cos(deg2rad(θ_deg))
+                C_σ    = compute_C(σ_val)
+                vol_target = 0.4 * vol_max
+
+                energy_fn(u)      = phase_field_energy(u, g, ε, l, σ_val, C_σ)
+                gradient_fn!(G,u) = phase_field_gradient!(G, u, g, ε, l, σ_val, C_σ)
+                volume_fn(u)      = compute_volume(u, g, l)
+
+                u_sol, λ_sol = solve_volume_constrained(
+                    energy_fn, gradient_fn!, volume_fn, vol_grad, u0, vol_target;
+                    contact = contact, tol_h = 1e-5, verbose = false)
+
+                # Volume constraint satisfied over the open-gap region
+                @test isapprox(compute_volume(u_sol, g, l), vol_target, atol=1e-4)
+
+                # Phase field is exactly zero in the entire contact region
+                @test all(u_sol[contact] .== 0.0)
+
+                @test all(u_sol .>= 0.0)
+                @test all(u_sol .<= 1.0)
+                @test isfinite(λ_sol)
+            end
+        end
+    end
+
 
 end

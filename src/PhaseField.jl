@@ -284,18 +284,21 @@ function solve_volume_constrained(
     vol_grad::Vector{Float64},
     u0::Vector{Float64},
     vol_target::Float64;
+    contact    = nothing,   # Bool vector, length N; true = node is in contact, u forced to 0
     tol_h      = 1e-7,
     max_outer  = 30,
     inner_iter = 500,
     c_init     = 10.0,
     verbose    = false,
 )
-    eps_clamp = 1e-10
-    v         = logit.(clamp.(u0, eps_clamp, 1.0 - eps_clamp))
-    Gu        = similar(v)
-    λ         = 0.0
-    c         = Float64(c_init)
-    h_prev    = Inf
+    has_contact = !isnothing(contact) && any(contact)
+    eps_clamp   = 1e-10
+    v           = logit.(clamp.(u0, eps_clamp, 1.0 - eps_clamp))
+    has_contact && (v[contact] .= logit(eps_clamp))   # initialise contact nodes to u ≈ 0
+    Gu     = similar(v)
+    λ      = 0.0
+    c      = Float64(c_init)
+    h_prev = Inf
 
     if verbose
         @printf("%-6s │ %-14s │ %-12s │ %-12s\n", "outer", "energy", "|V−V*|", "λ")
@@ -307,6 +310,7 @@ function solve_volume_constrained(
 
         function f(v_k)
             u_k = sigmoid.(v_k)
+            has_contact && (u_k[contact] .= 0.0)
             V   = volume_fn(u_k)
             h   = V - vol_target
             return energy_fn(u_k) + λk * h + 0.5 * ck * h^2
@@ -314,17 +318,20 @@ function solve_volume_constrained(
 
         function g!(Gv, v_k)
             u_k = sigmoid.(v_k)
+            has_contact && (u_k[contact] .= 0.0)
             V   = volume_fn(u_k)
             h   = V - vol_target
             mul = λk + ck * h
-            
+
             gradient_fn!(Gu, u_k)
             Gu .+= mul .* vol_grad
-            
+            has_contact && (Gu[contact] .= 0.0)
+
             # Gv = Gu * du/dv; du/dv = sigmoid'(v) = u*(1-u)
             for i in eachindex(Gv)
                 Gv[i] = Gu[i] * u_k[i] * (1.0 - u_k[i])
             end
+            has_contact && (Gv[contact] .= 0.0)
             return Gv
         end
 
@@ -332,6 +339,7 @@ function solve_volume_constrained(
                        Optim.Options(iterations = inner_iter, g_tol = 1e-6))
         v   = Optim.minimizer(res)
         u   = sigmoid.(v)
+        has_contact && (u[contact] .= 0.0)
 
         V = volume_fn(u)
         h = V - vol_target
@@ -349,6 +357,8 @@ function solve_volume_constrained(
     end
 
     @warn "solve_volume_constrained: augmented Lagrangian did not converge to tol_h = $tol_h"
+    u = sigmoid.(v)
+    has_contact && (u[contact] .= 0.0)
     return u, λ
 end
 
