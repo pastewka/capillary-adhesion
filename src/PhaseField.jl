@@ -71,12 +71,14 @@ end
 #   Triangle 0:  ∂u/∂x = (u[i+1,j] - u[i,j]) / l,   ∂u/∂y = (u[i,j+1] - u[i,j]) / l
 #   Triangle 1:  ∂u/∂x = (u[i+1,j+1] - u[i,j+1]) / l, ∂u/∂y = (u[i+1,j+1] - u[i+1,j]) / l
 #
+# Grid spacings lx (x) and ly (y) may differ; square grids use lx = ly = l.
+#
 # Energy functional (paper eq. phase-field-approx-energy):
 #
 #   I_ε[u] = ∫_ω { g(x)·C(σ)·(1/β[W])·(ε|∇u|² + W(u)/ε) + 2σ·u } dx
 
 """
-    phase_field_energy(u_vec, g, ε, l, σ_val, C_σ)
+    phase_field_energy(u_vec, g, ε, lx, ly, σ_val, C_σ)
 
 Evaluate the phase-field energy using P1 FEM with centroid quadrature.
 
@@ -84,19 +86,21 @@ Evaluate the phase-field energy using P1 FEM with centroid quadrature.
 - `u_vec`: phase-field values, length Nx*Ny (column-major, i.e. `u[i,j]` is the (i,j)-th node)
 - `g`: gap field, size (Nx, Ny)
 - `ε`: interface thickness
-- `l`: uniform grid spacing
+- `lx`, `ly`: grid spacings in x and y (pass `l, l` for a square grid)
 - `σ_val`: adhesion coefficient σ = -cos θ
 - `C_σ`: precomputed C(σ); pass `compute_C(σ_val)`
 """
 function phase_field_energy(u_vec::Vector{Float64}, g::Matrix{Float64},
-                             ε::Float64, l::Float64, σ_val::Float64, C_σ::Float64)
+                             ε::Float64, lx::Float64, ly::Float64,
+                             σ_val::Float64, C_σ::Float64)
     Nx, Ny = size(g)
     u = reshape(u_vec, Nx, Ny)
     energy  = 0.0
     inv_ε   = 1.0 / ε
-    inv_l   = 1.0 / l
+    inv_lx  = 1.0 / lx
+    inv_ly  = 1.0 / ly
     pf      = perimeter_prefactor
-    aw      = 0.5 * l^2  # pixel area × centroid-rule weight (same for both triangles)
+    aw      = 0.5 * lx * ly
 
     for j in 1:Ny
         jp1 = j < Ny ? j + 1 : 1
@@ -106,19 +110,17 @@ function phase_field_energy(u_vec::Vector{Float64}, g::Matrix{Float64},
             u00 = u[i, j];    u10 = u[ip1, j];    u01 = u[i, jp1];    u11 = u[ip1, jp1]
             g00 = g[i, j];    g10 = g[ip1, j];    g01 = g[i, jp1];    g11 = g[ip1, jp1]
 
-            # Triangle 0: nodes (i,j), (i+1,j), (i,j+1)
             u_q0  = (u00 + u10 + u01) / 3.0
             g_q0  = (g00 + g10 + g01) / 3.0
-            gx_q0 = (u10 - u00) * inv_l
-            gy_q0 = (u01 - u00) * inv_l
+            gx_q0 = (u10 - u00) * inv_lx
+            gy_q0 = (u01 - u00) * inv_ly
             e_q0  = g_q0 * C_σ * pf * (ε * (gx_q0^2 + gy_q0^2) + W(u_q0) * inv_ε) +
                     2.0 * σ_val * u_q0
 
-            # Triangle 1: nodes (i+1,j+1), (i+1,j), (i,j+1)
             u_q1  = (u11 + u10 + u01) / 3.0
             g_q1  = (g11 + g10 + g01) / 3.0
-            gx_q1 = (u11 - u01) * inv_l
-            gy_q1 = (u11 - u10) * inv_l
+            gx_q1 = (u11 - u01) * inv_lx
+            gy_q1 = (u11 - u10) * inv_ly
             e_q1  = g_q1 * C_σ * pf * (ε * (gx_q1^2 + gy_q1^2) + W(u_q1) * inv_ε) +
                     2.0 * σ_val * u_q1
 
@@ -128,117 +130,117 @@ function phase_field_energy(u_vec::Vector{Float64}, g::Matrix{Float64},
     return energy
 end
 
+phase_field_energy(u_vec::Vector{Float64}, g::Matrix{Float64},
+                   ε::Float64, l::Float64, σ_val::Float64, C_σ::Float64) =
+    phase_field_energy(u_vec, g, ε, l, l, σ_val, C_σ)
+
 """
-    phase_field_gradient!(G_vec, u_vec, g, ε, l, σ_val, C_σ)
+    phase_field_gradient!(G_vec, u_vec, g, ε, lx, ly, σ_val, C_σ)
 
 Compute the gradient of `phase_field_energy` w.r.t. `u_vec` via the exact adjoint of the P1 FEM.
 Result is accumulated into `G_vec` (which is first zeroed).
+Pass `l, l` for `lx, ly` on a square grid.
 """
 function phase_field_gradient!(G_vec::Vector{Float64}, u_vec::Vector{Float64},
-                                g::Matrix{Float64}, ε::Float64, l::Float64,
+                                g::Matrix{Float64}, ε::Float64,
+                                lx::Float64, ly::Float64,
                                 σ_val::Float64, C_σ::Float64)
     Nx, Ny = size(g)
     u = reshape(u_vec, Nx, Ny)
     G = reshape(G_vec, Nx, Ny)
     fill!(G, 0.0)
 
-    inv_ε = 1.0 / ε
-    inv_l = 1.0 / l
-    pf    = perimeter_prefactor
-    aw    = 0.5 * l^2   # area × quad weight
+    inv_ε  = 1.0 / ε
+    inv_lx = 1.0 / lx
+    inv_ly = 1.0 / ly
+    pf     = perimeter_prefactor
+    aw     = 0.5 * lx * ly
 
     for j in 1:Ny
         jp1 = j < Ny ? j + 1 : 1
         for i in 1:Nx
             ip1 = i < Nx ? i + 1 : 1
 
-            u00 = u[i, j];    u10 = u[ip1, j];    u01 = u[i, jp1];    u11 = u[ip1, jp1]
-            g00 = g[i, j];    g10 = g[ip1, j];    g01 = g[i, jp1];    g11 = g[ip1, jp1]
+            u00 = u[i,j]; u10 = u[ip1,j]; u01 = u[i,jp1]; u11 = u[ip1,jp1]
+            g00 = g[i,j]; g10 = g[ip1,j]; g01 = g[i,jp1]; g11 = g[ip1,jp1]
 
-            # ---- Triangle 0 ----
             u_q0  = (u00 + u10 + u01) / 3.0
             g_q0  = (g00 + g10 + g01) / 3.0
-            gx_q0 = (u10 - u00) * inv_l
-            gy_q0 = (u01 - u00) * inv_l
+            gx_q0 = (u10 - u00) * inv_lx
+            gy_q0 = (u01 - u00) * inv_ly
 
-            # Sensitivities of the local energy density at this quad point:
-            #   ∂e/∂u_q   = g_q·C_σ·pf·dW(u_q)/ε + 2σ
-            #   ∂e/∂(∂u/∂x) = g_q·C_σ·pf·2ε·(∂u/∂x)
-            #   ∂e/∂(∂u/∂y) = g_q·C_σ·pf·2ε·(∂u/∂y)
             de_du0  = g_q0 * C_σ * pf * inv_ε * dW(u_q0) + 2.0 * σ_val
             de_dgx0 = g_q0 * C_σ * pf * ε * 2.0 * gx_q0
             de_dgy0 = g_q0 * C_σ * pf * ε * 2.0 * gy_q0
 
-            # Backward through value interpolation (N = 1/3 for each of the three nodes):
             v0 = aw / 3.0 * de_du0
-            G[i, j]   += v0
-            G[ip1, j] += v0
-            G[i, jp1] += v0
+            G[i,j] += v0;  G[ip1,j] += v0;  G[i,jp1] += v0
 
-            # Backward through x-gradient:  ∂u/∂x = (u[ip1,j] - u[i,j]) / l
-            s = aw * inv_l * de_dgx0
-            G[i, j]   -= s
-            G[ip1, j] += s
+            s = aw * inv_lx * de_dgx0
+            G[i,j] -= s;  G[ip1,j] += s
 
-            # Backward through y-gradient:  ∂u/∂y = (u[i,jp1] - u[i,j]) / l
-            s = aw * inv_l * de_dgy0
-            G[i, j]   -= s
-            G[i, jp1] += s
+            s = aw * inv_ly * de_dgy0
+            G[i,j] -= s;  G[i,jp1] += s
 
-            # ---- Triangle 1 ----
             u_q1  = (u11 + u10 + u01) / 3.0
             g_q1  = (g11 + g10 + g01) / 3.0
-            gx_q1 = (u11 - u01) * inv_l
-            gy_q1 = (u11 - u10) * inv_l
+            gx_q1 = (u11 - u01) * inv_lx
+            gy_q1 = (u11 - u10) * inv_ly
 
             de_du1  = g_q1 * C_σ * pf * inv_ε * dW(u_q1) + 2.0 * σ_val
             de_dgx1 = g_q1 * C_σ * pf * ε * 2.0 * gx_q1
             de_dgy1 = g_q1 * C_σ * pf * ε * 2.0 * gy_q1
 
-            # Backward through value interpolation:
             v1 = aw / 3.0 * de_du1
-            G[ip1, jp1] += v1
-            G[ip1, j]   += v1
-            G[i, jp1]   += v1
+            G[ip1,jp1] += v1;  G[ip1,j] += v1;  G[i,jp1] += v1
 
-            # Backward through x-gradient:  ∂u/∂x = (u[ip1,jp1] - u[i,jp1]) / l
-            s = aw * inv_l * de_dgx1
-            G[i, jp1]   -= s
-            G[ip1, jp1] += s
+            s = aw * inv_lx * de_dgx1
+            G[i,jp1] -= s;  G[ip1,jp1] += s
 
-            # Backward through y-gradient:  ∂u/∂y = (u[ip1,jp1] - u[ip1,j]) / l
-            s = aw * inv_l * de_dgy1
-            G[ip1, j]   -= s
-            G[ip1, jp1] += s
+            s = aw * inv_ly * de_dgy1
+            G[ip1,j] -= s;  G[ip1,jp1] += s
         end
     end
     return G_vec
 end
 
+phase_field_gradient!(G_vec::Vector{Float64}, u_vec::Vector{Float64},
+                      g::Matrix{Float64}, ε::Float64, l::Float64,
+                      σ_val::Float64, C_σ::Float64) =
+    phase_field_gradient!(G_vec, u_vec, g, ε, l, l, σ_val, C_σ)
+
 """
-    compute_volume(u_vec, g, l)
+    compute_volume(u_vec, g, lx, ly)
 
 Approximate V[u] = ∫_ω u(x)·g(x) dx via the nodal quadrature rule (cell-centred sum).
 For spatially uniform g this is exact relative to the FEM quadrature.
+Pass `l, l` for `lx, ly` on a square grid.
 """
-function compute_volume(u_vec::Vector{Float64}, g::Matrix{Float64}, l::Float64)
+function compute_volume(u_vec::Vector{Float64}, g::Matrix{Float64}, lx::Float64, ly::Float64)
     Nx, Ny = size(g)
     u = reshape(u_vec, Nx, Ny)
     vol = 0.0
     for j in 1:Ny, i in 1:Nx
-        vol += u[i, j] * g[i, j] * (l^2)
+        vol += u[i, j] * g[i, j] * lx * ly
     end
     return vol
 end
 
-"""
-    compute_volume_gradient(g, l)
+compute_volume(u_vec::Vector{Float64}, g::Matrix{Float64}, l::Float64) =
+    compute_volume(u_vec, g, l, l)
 
-Return the gradient of `compute_volume` w.r.t. `u_vec`: ∂V/∂u[k] = g[k]·l².
 """
-function compute_volume_gradient(g::Matrix{Float64}, l::Float64)
-    return vec(g) .* l^2
+    compute_volume_gradient(g, lx, ly)
+
+Return the gradient of `compute_volume` w.r.t. `u_vec`: ∂V/∂u[k] = g[k]·lx·ly.
+Pass `l, l` for `lx, ly` on a square grid.
+"""
+function compute_volume_gradient(g::Matrix{Float64}, lx::Float64, ly::Float64)
+    return vec(g) .* (lx * ly)
 end
+
+compute_volume_gradient(g::Matrix{Float64}, l::Float64) =
+    compute_volume_gradient(g, l, l)
 
 """
     solve_volume_constrained(energy_fn, gradient_fn!, volume_fn, vol_grad, u0, vol_target;

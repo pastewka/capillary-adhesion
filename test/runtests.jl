@@ -99,6 +99,31 @@ using Statistics
         end
     end
 
+    @testset "Energy and Gradient consistency — anisotropic grid (lx ≠ ly)" begin
+        Nx, Ny = 6, 8
+        lx = 0.08
+        ly = 0.15
+        ε = 0.06
+        σ_val = 0.2
+        C_σ = compute_C(σ_val)
+
+        Random.seed!(77)
+        u_vec = rand(Float64, Nx * Ny)
+        g = 1.0 .+ rand(Float64, Nx, Ny) .* 0.4
+
+        G_vec = zeros(Float64, Nx * Ny)
+        phase_field_gradient!(G_vec, u_vec, g, ε, lx, ly, σ_val, C_σ)
+
+        delta = 1e-6
+        for k in 1:Nx*Ny
+            u_p = copy(u_vec); u_p[k] += delta
+            u_m = copy(u_vec); u_m[k] -= delta
+            fd = (phase_field_energy(u_p, g, ε, lx, ly, σ_val, C_σ) -
+                  phase_field_energy(u_m, g, ε, lx, ly, σ_val, C_σ)) / (2.0 * delta)
+            @test isapprox(G_vec[k], fd, rtol=1e-4, atol=1e-8)
+        end
+    end
+
     @testset "Energy vanishes for constant u at a minimiser of W" begin
         # u ≡ 0 (or u ≡ 1) has zero gradient energy and W(u)=0; the wetting term 2σu
         # is linear so the total energy is just 2σ * u * |ω|
@@ -218,6 +243,8 @@ using Statistics
         @test all(u_sol .<= 1.0)
         @test isfinite(λ_sol)
     end
+
+    include("test_stripe_interface.jl")
 
     @testset "Roughness module accessible via PhaseField" begin
         # Regression test: Roughness was not included in PhaseField.jl, making it

@@ -1,0 +1,332 @@
+---
+title: "Numerical Implementation of the Dimensionally-Reduced Phase-Field Capillary Model"
+author:
+  - name: Luciano Sciaraffia
+  - name: Lars Pastewka
+  - name: Yizhen Wang
+date: last-modified
+format:
+  html:
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    html-math-method: mathjax
+  pdf:
+    toc: true
+    number-sections: true
+    keep-tex: false
+    documentclass: article
+    geometry: margin=2.5cm
+bibliography: references.bib
+---
+
+# Overview
+
+This document describes the mathematical formulation and numerical implementation of the
+dimensionally-reduced phase-field model for capillary bridges confined between two solid plates.
+The physics is implemented in two languages:
+
+- **Julia** (`src/PhaseField.jl`): reference implementation with an explicit loop-level FEM assembly and augmented-Lagrangian solver.
+- **Python** (`capillary-adhesion/a_package/`): sparse-matrix formulation of the same FEM, with an object-oriented optimizer interface.
+
+Both implementations solve the same mathematical problem. The Julia version is used to produce
+the simulation results in the associated paper; the Python version serves as an independently
+validated reference and is designed for large parameter sweeps.
+
+# Physical Setup
+
+Consider a periodic two-dimensional domain $\omega = [0, L_x) \times [0, L_y)$ representing
+the in-plane coordinates of a thin liquid film confined between two rigid solid plates.
+The local gap (separation between the plates) is a given field
+$$
+g : \omega \to [0, \infty),
+$$
+obtained as
+$$
+g(\mathbf{x}) = \max\bigl(z + h_\mathrm{top}(\mathbf{x}) - h_\mathrm{bot}(\mathbf{x}),\, 0\bigr),
+$$
+where $z$ is the mean plate separation and $h_\mathrm{top}$, $h_\mathrm{bot}$ are the surface
+height profiles of the upper and lower plates.  When $g = 0$ the plates are in contact and no
+liquid can be present.
+
+The liquid occupancy is described by a phase field $u : \omega \to [0, 1]$, with $u = 1$
+representing fully liquid and $u = 0$ representing vapour.  The liquid volume is
+$$
+V[u] = \int_\omega u(\mathbf{x})\, g(\mathbf{x})\, d\mathbf{x}.
+$$
+
+# Phase-Field Energy Functional
+
+## Modica–Mortola Approximation
+
+The Modica–Mortola functional approximates the perimeter of the liquid–vapour interface.
+For a diffuse-interface parameter $\varepsilon > 0$ and a double-well potential
+$$
+W(u) = u^2 (1 - u)^2, \qquad \beta_W = 2\int_0^1 \sqrt{W(u)}\,du = \tfrac{1}{3},
+$$
+the perimeter density at a quadrature point is
+$$
+p_\varepsilon(u, \nabla u) = \frac{1}{\beta_W}\!\left(\varepsilon |\nabla u|^2 + \frac{W(u)}{\varepsilon}\right)
+= 3\!\left(\varepsilon |\nabla u|^2 + \frac{W(u)}{\varepsilon}\right).
+$$
+As $\varepsilon \to 0$, $\int_\omega p_\varepsilon(u,\nabla u)\,d\mathbf{x}$ $\Gamma$-converges to
+the perimeter of the liquid–vapour interface (Modica–Mortola theorem).
+
+## Capillary Integral
+
+The dimensionally-reduced model accounts for the three-dimensional shape of the meniscus
+through a curvature prefactor $C(\sigma)$.  With the Young–Dupré adhesion coefficient
+$\sigma = -\cos\theta$ (where $\theta$ is the equilibrium contact angle), this prefactor is
+$$
+C(\sigma) = \int_{-1/2}^{1/2} \sqrt{1 - (2\sigma t)^2}\,dt
+= \frac{\sqrt{1-\sigma^2}}{2} + \frac{\arcsin(\sigma)}{2\sigma}.
+$$
+For $|\sigma| \ll 1$ (contact angle near $90°$) the Taylor expansion $C(\sigma) \approx 1 - \sigma^2/6$
+is used to avoid numerical cancellation.
+
+In the Python model the equivalent prefactor is written as
+$$
+C_\mathrm{py}(\theta) = \tfrac{1}{2}\!\left(|\sin\theta| + \frac{\arcsin(\cos\theta)}{\cos\theta}\right),
+$$
+which is algebraically identical after substituting $\sigma = -\cos\theta$.
+
+## Total Energy Functional
+
+The dimensionally-reduced phase-field capillary energy is
+$$
+\boxed{
+I_\varepsilon[u] = \int_\omega \left\{
+  g(\mathbf{x})\, C(\sigma)\, \frac{1}{\beta_W}
+  \!\left(\varepsilon |\nabla u|^2 + \frac{W(u)}{\varepsilon}\right)
+  + 2\sigma\, u
+\right\} d\mathbf{x}.
+}
+$$
+The first term represents the liquid–vapour interfacial energy (perimeter, weighted by the
+local gap and renormalized by $C(\sigma)$ to account for meniscus curvature).  The second term
+$2\sigma u$ is the liquid–solid wetting energy on the two plate surfaces (upper and lower),
+with coefficient $\sigma = -\cos\theta$ (Young–Dupré relation).
+
+## Volume-Constrained Minimization
+
+Equilibrium phase fields are sought by minimizing $I_\varepsilon$ subject to a prescribed
+liquid volume $V^*$ and box constraints:
+$$
+\min_{u}\; I_\varepsilon[u]
+\quad \text{subject to} \quad
+V[u] = V^*, \quad 0 \le u(\mathbf{x}) \le 1.
+$$
+
+# Finite Element Discretization
+
+## Periodic Grid
+
+The domain $\omega$ is discretized by a uniform periodic grid of $N_x \times N_y$ nodes
+with spacing $l$ in both directions ($L_x = N_x l$, $L_y = N_y l$).  Node $(i,j)$ has
+coordinates $(il, jl)$, with indices taken modulo $N_x$ and $N_y$ respectively.
+
+## Triangulation
+
+Each pixel $(i,j)$ is divided into two triangles by the diagonal from $(i+1,j)$ to $(i,j+1)$:
+
+```
+(i, j+1) ---- (i+1, j+1)
+    |         /  |
+    |  T1   /    |
+    |     /  T0  |
+ (i, j)  ---- (i+1, j)
+```
+
+- **Triangle $T_0$** (lower-right): nodes $(i,j)$, $(i+1,j)$, $(i,j+1)$; local region $x_1 + x_2 < 1$.
+- **Triangle $T_1$** (upper-left): nodes $(i+1,j+1)$, $(i+1,j)$, $(i,j+1)$; local region $x_1 + x_2 > 1$.
+
+## P1 Shape Functions and Centroid Quadrature
+
+P1 (piecewise-linear) basis functions are used.  Centroid quadrature places one integration
+point per triangle at the centroid, with weight $\tfrac{1}{2}l^2$ (the area of one triangle):
+
+| Triangle | Centroid $(x_1,x_2)$ | Shape-function values at centroid |
+|----------|----------------------|-----------------------------------|
+| $T_0$ | $(1/3,\; 1/3)$ | $N_{(i,j)} = N_{(i+1,j)} = N_{(i,j+1)} = 1/3$ |
+| $T_1$ | $(2/3,\; 2/3)$ | $N_{(i+1,j+1)} = N_{(i+1,j)} = N_{(i,j+1)} = 1/3$ |
+
+The interpolated phase value at each centroid is therefore the arithmetic mean of the three
+corner nodal values.
+
+## Gradient Interpolation
+
+P1 gradients are constant per triangle.  Dividing the finite differences by the element size $l$:
+
+| Triangle | $\partial u/\partial x$ | $\partial u/\partial y$ |
+|----------|-------------------------|-------------------------|
+| $T_0$ | $(u_{i+1,j} - u_{i,j})/l$ | $(u_{i,j+1} - u_{i,j})/l$ |
+| $T_1$ | $(u_{i+1,j+1} - u_{i,j+1})/l$ | $(u_{i+1,j+1} - u_{i+1,j})/l$ |
+
+## Discrete Energy
+
+Assembling over all pixels and both triangles per pixel, with quadrature weight $l^2/2$:
+$$
+I_\varepsilon^h[\mathbf{u}] = \frac{l^2}{2} \sum_{i=0}^{N_x-1} \sum_{j=0}^{N_y-1}
+\sum_{k \in \{0,1\}} e\!\left(u_q^k,\; g_q^k,\; \nabla u_q^k\right),
+$$
+where $(u_q^k, g_q^k, \nabla u_q^k)$ denote the phase, gap, and gradient at the centroid
+of triangle $k$ in pixel $(i,j)$, and the local energy density is
+$$
+e(u, g, \nabla u) = g\, C(\sigma)\, \frac{3}{\phantom{1}}\!\left(\varepsilon |\nabla u|^2 + \frac{W(u)}{\varepsilon}\right) + 2\sigma\, u.
+$$
+
+## Discrete Volume
+
+The volume integral is approximated by a nodal (cell-centred) quadrature rule:
+$$
+V^h[\mathbf{u}] = l^2 \sum_{i,j} u_{i,j}\, g_{i,j}.
+$$
+The gradient with respect to $u_{i,j}$ is simply $\partial V^h / \partial u_{i,j} = g_{i,j}\, l^2$.
+
+# Energy Gradient: Adjoint Assembly
+
+The gradient $\nabla_{\mathbf{u}} I_\varepsilon^h$ is computed by differentiating the assembled
+energy and backpropagating through the interpolation operators (reverse-mode / adjoint).
+
+For a single pixel $(i,j)$ and triangle $T_0$, the local energy contribution involves:
+
+1. **Value interpolation**: $u_q = (u_{i,j} + u_{i+1,j} + u_{i,j+1})/3$.
+2. **Gradient interpolation**: $\nabla u_q = ((u_{i+1,j}-u_{i,j})/l,\; (u_{i,j+1}-u_{i,j})/l)$.
+
+Local sensitivities of the energy density $e$:
+$$
+\frac{\partial e}{\partial u_q} = g_q\, C(\sigma)\cdot 3\,\frac{dW(u_q)/du_q}{\varepsilon} + 2\sigma,
+\qquad
+\frac{\partial e}{\partial (\nabla u)_\alpha} = g_q\, C(\sigma)\cdot 3\cdot 2\varepsilon\,(\nabla u_q)_\alpha,
+$$
+where $dW/du = 2u(1-u)(1-2u)$.
+
+Multiplied by $l^2/2$ and accumulated into the nodal gradient via the transpose of the interpolation operators:
+
+- **From value**: each of the three corner nodes receives $\frac{l^2/2}{3} \cdot \frac{\partial e}{\partial u_q}$.
+- **From $x$-gradient**: node $(i+1,j)$ receives $+\frac{l^2/2}{l} \cdot \frac{\partial e}{\partial (\nabla u)_x}$; node $(i,j)$ receives $-$ the same.
+- **From $y$-gradient**: node $(i,j+1)$ receives $+\frac{l^2/2}{l} \cdot \frac{\partial e}{\partial (\nabla u)_y}$; node $(i,j)$ receives $-$ the same.
+
+Triangle $T_1$ contributes analogously.  The periodicity is handled by wrapping indices
+modulo $N_x$ and $N_y$.
+
+## Sparse-Matrix Formulation (Python)
+
+The Python implementation pre-builds sparse matrices that encode the same operation:
+
+- `matrix_val` $\in \mathbb{R}^{2N_xN_y \times N_xN_y}$: maps nodal values to centroid values for both triangles.
+- `matrix_grad` $\in \mathbb{R}^{4N_xN_y \times N_xN_y}$: maps nodal values to $(x,y)$-gradient components at both triangle centroids.
+
+Energy and gradient evaluations then reduce to matrix–vector products:
+
+```python
+quadr_phase       = (matrix_val   @ nodal_phase.ravel()).reshape(...)
+quadr_phase_grad  = (matrix_grad  @ nodal_phase.ravel()).reshape(...)
+energy_grad_nodal = sens_val @ matrix_val + sens_grad @ matrix_grad
+```
+
+This avoids Python loops over pixels and enables efficient batch evaluation.
+
+# Volume-Constrained Solver
+
+## Augmented Lagrangian Method
+
+The equality constraint $V[\mathbf{u}] = V^*$ is handled by an augmented Lagrangian outer loop.
+Define the augmented Lagrangian:
+$$
+\mathcal{L}(\mathbf{u};\,\lambda, c) = I_\varepsilon^h[\mathbf{u}]
++ \lambda\bigl(V^h[\mathbf{u}] - V^*\bigr)
++ \frac{c}{2}\bigl(V^h[\mathbf{u}] - V^*\bigr)^2,
+$$
+with Lagrange multiplier $\lambda$ (physically: the Laplace pressure) and penalty weight $c > 0$.
+
+**Algorithm:**
+
+1. Initialize $\lambda^{(0)} = 0$, $c^{(0)} = c_0$, $\mathbf{u}^{(0)}$.
+2. For outer iteration $k = 0, 1, \ldots$:
+   a. Solve $\mathbf{u}^{(k+1)} = \arg\min_{\mathbf{u} \in [0,1]^{N}} \mathcal{L}(\mathbf{u};\,\lambda^{(k)}, c^{(k)})$ using box-constrained L-BFGS.
+   b. Compute constraint violation $h^{(k+1)} = V^h[\mathbf{u}^{(k+1)}] - V^*$.
+   c. If $|h^{(k+1)}| < \tau_h$: converged; return $(\mathbf{u}^{(k+1)}, \lambda^{(k)})$.
+   d. Update $\lambda^{(k+1)} = \lambda^{(k)} + c^{(k)} h^{(k+1)}$.
+   e. If $|h^{(k+1)}| > \tfrac{1}{4}|h^{(k)}|$: set $c^{(k+1)} = 2c^{(k)}$ (double penalty if insufficient progress).
+
+**Gradient** of $\mathcal{L}$ w.r.t. $\mathbf{u}$:
+$$
+\nabla_{\mathbf{u}} \mathcal{L} = \nabla_{\mathbf{u}} I_\varepsilon^h
++ \bigl(\lambda + c(V^h - V^*)\bigr)\, \nabla_{\mathbf{u}} V^h.
+$$
+Since $\nabla_{\mathbf{u}} V^h$ is the constant vector with components $g_{i,j}\,l^2$, this
+requires only one additional scalar–vector multiply per gradient evaluation.
+
+## Box Constraints via Sigmoid Reparametrization (Julia)
+
+The Julia implementation enforces $u \in (0,1)$ by reparametrizing $u = \sigma(v)$
+where $\sigma(v) = (1 + e^{-v})^{-1}$ is the sigmoid (logistic) function.  The unconstrained
+variable $v \in \mathbb{R}$ is passed to L-BFGS.  The chain rule gives
+$$
+\frac{\partial \mathcal{L}}{\partial v_k} = \frac{\partial \mathcal{L}}{\partial u_k}\,\sigma'(v_k),
+\qquad \sigma'(v) = u_k(1 - u_k).
+$$
+
+## Bound-Masking (Python)
+
+The Python implementation uses gradient masking at active bounds (projected gradient):
+$$
+\left(\nabla_{\mathbf{u}} \mathcal{L}\right)_k =
+\begin{cases}
+0 & \text{if } u_k = 0 \text{ and } \partial \mathcal{L}/\partial u_k > 0, \\
+0 & \text{if } u_k = 1 \text{ and } \partial \mathcal{L}/\partial u_k < 0, \\
+\partial \mathcal{L}/\partial u_k & \text{otherwise.}
+\end{cases}
+$$
+The masked gradient is passed to `scipy.optimize.fmin_l_bfgs_b` (L-BFGS-B).
+
+# Self-Affine Surface Roughness
+
+## Power Spectral Density Model
+
+Self-affine (fractal) surfaces are characterized by a power-law power spectral density (PSD):
+$$
+C(q) \propto q^{-2-2H}, \qquad q_\mathrm{min} \le q < q_\mathrm{max},
+$$
+where $H \in (0,1)$ is the Hurst exponent, $q = |\mathbf{q}|$ is the radial wavenumber, and
+$q_\mathrm{min} = 2\pi/L$, $q_\mathrm{max} = \pi N/L$ are the long- and short-wavelength cutoffs.
+Below $q_\mathrm{min}$ (rolloff region) the PSD is held constant.
+
+The rms height and rms slope are related to the PSD by:
+$$
+h_\mathrm{rms}^2 = \int_{q_\mathrm{min}}^{q_\mathrm{max}} C(q)\,dq
+\propto q_\mathrm{min}^{-2H} - q_\mathrm{max}^{-2H},
+\qquad
+s_\mathrm{rms}^2 = \int_{q_\mathrm{min}}^{q_\mathrm{max}} q^2 C(q)\,dq
+\propto q_\mathrm{max}^{2-2H} - q_\mathrm{min}^{2-2H}.
+$$
+
+## Fourier-Filtering Synthesis
+
+Given a prescribed rms height $h_\mathrm{rms}$ (or rms slope $s_\mathrm{rms}$), the prefactor
+$A$ is determined analytically from the integrals above.  A realization is then generated by:
+
+1. Draw complex Fourier coefficients $\hat{h}(\mathbf{q}) = A\,\xi(\mathbf{q})\, q^{-(1+H)}$
+   where $\xi(\mathbf{q})$ are i.i.d. complex Gaussian random numbers with unit variance.
+2. Zero out modes with $q > q_\mathrm{max}$ (anti-aliasing cutoff).
+3. Apply rolloff: for $q < q_\mathrm{min}$, replace the amplitude with the value at $q_\mathrm{min}$ (scaled by `rolloff` factor).
+4. Enforce Hermitian symmetry $\hat{h}(-\mathbf{q}) = \hat{h}(\mathbf{q})^*$ so that the inverse FFT is real.
+5. Set the DC component ($\mathbf{q} = 0$) to zero (zero-mean surface).
+6. Compute the real-space surface $h(\mathbf{x}) = \mathrm{IFFT}[\hat{h}]$.
+
+The implementation uses a half-spectrum FFT (real-to-complex transform in $y$, complex-to-complex in $x$) via `irfft` / `ifft`.
+
+# Summary of Key Parameters
+
+| Symbol | Meaning | Typical value |
+|--------|---------|---------------|
+| $l$ | Grid spacing | 0.01 |
+| $N_x = N_y$ | Grid size | 1024 |
+| $\varepsilon$ | Interface thickness | $\sim 3l$ |
+| $\sigma = -\cos\theta$ | Adhesion coefficient | $[-1, 1]$ |
+| $z/l$ | Mean plate separation | 0.5–2.5 |
+| $H$ | Hurst exponent | 0.8 |
+| $\beta_W$ | Double-well normalization constant | $1/3$ |
+| $c_0$ | Initial augmented-Lagrangian penalty | 10 |
+| $\tau_h$ | Volume-constraint tolerance | $10^{-7}$ |
