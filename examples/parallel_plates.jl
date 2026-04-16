@@ -42,22 +42,22 @@ md"## Parameters
 All physical lengths in this simulation are expressed in terms of the grid spacing $l = 0.01$, which acts as the fundamental unit of length."
 
 # ╔═╡ 428b931a-53b5-b472-2c76-bba1b968cb97
-@bind Nx_slider Slider(64:64:1024, default=256, show_value=true)
+md"**Nx:** $(@bind Nx_slider Slider(64:64:1024, default=256, show_value=true))"
 
 # ╔═╡ 8e345092-49d9-44b3-f890-15e23821d0e2
-@bind Ny_slider Slider(64:64:1024, default=256, show_value=true)
+md"**Ny:** $(@bind Ny_slider Slider(64:64:1024, default=256, show_value=true))"
 
 # ╔═╡ 833a549b-8ae8-2e6a-bc2c-c640e0c30006
-@bind θ_deg_slider Slider(0:5:180, default=60, show_value=true)
+md"**Contact angle θ (deg):** $(@bind θ_deg_slider Slider(0:5:180, default=60, show_value=true))"
 
 # ╔═╡ e5eeb527-2474-12c6-084d-7481a2f72697
-@bind ε_slider Slider(0.5:0.1:5.0, default=1.0, show_value=true)
+md"**Interface thickness ε/l:** $(@bind ε_slider Slider(0.5:0.1:5.0, default=1.0, show_value=true))"
 
 # ╔═╡ 016e6426-d984-dc3b-7fff-9fa6ae445d46
-@bind z_slider Slider(1:0.5:20, default=10, show_value=true)
+md"**Plate separation z/l:** $(@bind z_slider Slider(1:0.5:20, default=10, show_value=true))"
 
 # ╔═╡ 4a17a372-c5f9-ff4e-5995-5b2745e875da
-@bind vol_fraction_slider Slider(0.01:0.01:0.99, default=0.2, show_value=true)
+md"**Target volume fraction:** $(@bind vol_fraction_slider Slider(0.01:0.01:0.99, default=0.2, show_value=true))"
 
 # ╔═╡ ecfb5864-544e-78a7-dd92-be6bf02ecb05
 begin
