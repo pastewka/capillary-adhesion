@@ -185,6 +185,20 @@ begin
             xlabel="x", ylabel="y")
 end
 
+# ╔═╡ 90918734-e422-25ba-aefa-db0f7a0333b1
+begin
+    u_in_contact = copy(u_mat)
+    u_in_contact[.!overlap] .= NaN
+
+    p_pf = heatmap(x_coords, y_coords, u_mat', aspect_ratio=:equal,
+                   title="Phase-field u", color=:viridis, clims=(0, 1),
+                   xlabel="x", ylabel="y")
+    p_contact_pf = heatmap(x_coords, y_coords, u_in_contact', aspect_ratio=:equal,
+                           title="Phase-field u in contact region", color=:viridis,
+                           clims=(0, 1), xlabel="x", ylabel="y")
+    plot(p_pf, p_contact_pf, layout=(1, 2), size=(1200, 500))
+end
+
 # ╔═╡ 90918734-901b-0e54-fc66-6466bfa2df0b
 begin
     md"""
@@ -220,4 +234,5 @@ end
 # ╠═90918734-8fb9-c879-7ac6-40a15b93b0ca
 # ╟─90918734-76cd-dce5-8932-5f3f986f1f8c
 # ╠═90918734-e421-25ba-aefa-db0f7a0333b1
+# ╠═90918734-e422-25ba-aefa-db0f7a0333b1
 # ╟─90918734-901b-0e54-fc66-6466bfa2df0b

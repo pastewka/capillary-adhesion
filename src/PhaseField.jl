@@ -115,14 +115,14 @@ function phase_field_energy(u_vec::Vector{Float64}, g::Matrix{Float64},
             gx_q0 = (u10 - u00) * inv_lx
             gy_q0 = (u01 - u00) * inv_ly
             e_q0  = g_q0 * C_σ * pf * (ε * (gx_q0^2 + gy_q0^2) + W(u_q0) * inv_ε) +
-                    2.0 * σ_val * u_q0
+                    (g_q0 > 0.0 ? 2.0 * σ_val * u_q0 : 0.0)
 
             u_q1  = (u11 + u10 + u01) / 3.0
             g_q1  = (g11 + g10 + g01) / 3.0
             gx_q1 = (u11 - u01) * inv_lx
             gy_q1 = (u11 - u10) * inv_ly
             e_q1  = g_q1 * C_σ * pf * (ε * (gx_q1^2 + gy_q1^2) + W(u_q1) * inv_ε) +
-                    2.0 * σ_val * u_q1
+                    (g_q1 > 0.0 ? 2.0 * σ_val * u_q1 : 0.0)
 
             energy += aw * (e_q0 + e_q1)
         end
@@ -169,7 +169,7 @@ function phase_field_gradient!(G_vec::Vector{Float64}, u_vec::Vector{Float64},
             gx_q0 = (u10 - u00) * inv_lx
             gy_q0 = (u01 - u00) * inv_ly
 
-            de_du0  = g_q0 * C_σ * pf * inv_ε * dW(u_q0) + 2.0 * σ_val
+            de_du0  = g_q0 * C_σ * pf * inv_ε * dW(u_q0) + (g_q0 > 0.0 ? 2.0 * σ_val : 0.0)
             de_dgx0 = g_q0 * C_σ * pf * ε * 2.0 * gx_q0
             de_dgy0 = g_q0 * C_σ * pf * ε * 2.0 * gy_q0
 
@@ -187,7 +187,7 @@ function phase_field_gradient!(G_vec::Vector{Float64}, u_vec::Vector{Float64},
             gx_q1 = (u11 - u01) * inv_lx
             gy_q1 = (u11 - u10) * inv_ly
 
-            de_du1  = g_q1 * C_σ * pf * inv_ε * dW(u_q1) + 2.0 * σ_val
+            de_du1  = g_q1 * C_σ * pf * inv_ε * dW(u_q1) + (g_q1 > 0.0 ? 2.0 * σ_val : 0.0)
             de_dgx1 = g_q1 * C_σ * pf * ε * 2.0 * gx_q1
             de_dgy1 = g_q1 * C_σ * pf * ε * 2.0 * gy_q1
 
