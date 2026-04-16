@@ -4,6 +4,7 @@ using LinearAlgebra
 using Printf
 using Random
 using Optim
+using LineSearches
 
 export compute_C, generate_topography, phase_field_energy, phase_field_gradient!,
        compute_volume, solve_volume_constrained
@@ -11,6 +12,19 @@ export compute_C, generate_topography, phase_field_energy, phase_field_gradient!
 # --- Potential and normalisation ---
 W(u)  = u^2 * (u - 1)^2
 dW(u) = 2.0 * u * (u - 1.0) * (2.0 * u - 1.0)
+
+# --- Box mapping (sigmoid/logit) ---
+# Maps unconstrained v to u ∈ (0, 1) to enforce box constraints.
+function sigmoid(v::Float64)
+    if v >= 0.0
+        z = exp(-v)
+        return 1.0 / (1.0 + z)
+    else
+        z = exp(v)
+        return z / (1.0 + z)
+    end
+end
+logit(u::Float64) = log(u / (1.0 - u))
 
 # β[W] = 2∫₀¹ √W(u) du = 2∫₀¹ u(1-u) du = 1/3, so the perimeter prefactor is 1/β[W] = 3.
 const perimeter_prefactor = 3.0
@@ -266,16 +280,12 @@ function solve_volume_constrained(
     c_init     = 10.0,
     verbose    = false,
 )
-    n   = length(u0)
-    lb  = fill(0.0, n)
-    ub  = fill(1.0, n)
     eps_clamp = 1e-10
-
-    u      = clamp.(u0, eps_clamp, 1.0 - eps_clamp)
-    G      = similar(u)
-    λ      = 0.0
-    c      = Float64(c_init)
-    h_prev = Inf
+    v         = logit.(clamp.(u0, eps_clamp, 1.0 - eps_clamp))
+    Gu        = similar(v)
+    λ         = 0.0
+    c         = Float64(c_init)
+    h_prev    = Inf
 
     if verbose
         @printf("%-6s │ %-14s │ %-12s │ %-12s\n", "outer", "energy", "|V−V*|", "λ")
@@ -285,24 +295,33 @@ function solve_volume_constrained(
     for outer in 1:max_outer
         λk, ck = λ, c
 
-        function f(u_k)
-            V = volume_fn(u_k)
-            h = V - vol_target
+        function f(v_k)
+            u_k = sigmoid.(v_k)
+            V   = volume_fn(u_k)
+            h   = V - vol_target
             return energy_fn(u_k) + λk * h + 0.5 * ck * h^2
         end
 
-        function g!(Gk, u_k)
+        function g!(Gv, v_k)
+            u_k = sigmoid.(v_k)
             V   = volume_fn(u_k)
             h   = V - vol_target
             mul = λk + ck * h
-            gradient_fn!(Gk, u_k)
-            Gk .+= mul .* vol_grad
-            return Gk
+            
+            gradient_fn!(Gu, u_k)
+            Gu .+= mul .* vol_grad
+            
+            # Gv = Gu * du/dv; du/dv = sigmoid'(v) = u*(1-u)
+            for i in eachindex(Gv)
+                Gv[i] = Gu[i] * u_k[i] * (1.0 - u_k[i])
+            end
+            return Gv
         end
 
-        res = optimize(f, g!, lb, ub, u, Fminbox(LBFGS()),
+        res = optimize(f, g!, v, LBFGS(linesearch=LineSearches.BackTracking()),
                        Optim.Options(iterations = inner_iter, g_tol = 1e-6))
-        u = clamp.(Optim.minimizer(res), eps_clamp, 1.0 - eps_clamp)
+        v   = Optim.minimizer(res)
+        u   = sigmoid.(v)
 
         V = volume_fn(u)
         h = V - vol_target
