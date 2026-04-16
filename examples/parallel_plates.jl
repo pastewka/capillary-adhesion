@@ -119,7 +119,7 @@ begin
 end
 
 # ╔═╡ 996a156f-184b-e181-d9fa-920d6d218f98
-heatmap(x_coords, y_coords, reshape(u0, Nx, Ny), aspect_ratio=:equal, title="Initial condition u0", color=:viridis, xlabel="x", ylabel="y")
+heatmap(x_coords, y_coords, reshape(u0, Nx, Ny)', aspect_ratio=:equal, title="Initial condition u0", color=:viridis, xlabel="x", ylabel="y")
 
 # ╔═╡ cb4233bf-a9fb-ad9a-cce6-9163922ee12e
 @bind run_button Button("Run Simulation")
@@ -148,7 +148,7 @@ md"## Results"
 
 # ╔═╡ e42125ba-aefa-db0f-7a03-33b13b846840
 begin
-    heatmap(x_coords, y_coords, u_mat, aspect_ratio=:equal, title="Phase-field u", color=:viridis,
+    heatmap(x_coords, y_coords, u_mat', aspect_ratio=:equal, title="Phase-field u", color=:viridis,
             xlabel="x", ylabel="y")
 end
 

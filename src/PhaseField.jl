@@ -6,8 +6,12 @@ using Random
 using Optim
 using LineSearches
 
-export compute_C, generate_topography, phase_field_energy, phase_field_gradient!,
-       compute_volume, solve_volume_constrained
+include("Roughness.jl")
+using .Roughness
+
+export compute_C, phase_field_energy, phase_field_gradient!,
+       compute_volume, compute_volume_gradient, solve_volume_constrained,
+       Roughness
 
 # --- Potential and normalisation ---
 W(u)  = u^2 * (u - 1)^2
@@ -43,11 +47,6 @@ function compute_C(σ::Float64)
     else
         return 0.5 * sqrt(1.0 - σ^2) + asin(σ) / (2.0 * σ)
     end
-end
-
-function generate_topography(Nx::Int, Ny::Int, l::Float64; amplitude=0.15, seed=123)
-    Random.seed!(seed)
-    return (rand(Float64, Nx, Ny) .- 0.5) .* 2.0 .* amplitude
 end
 
 # --- FEM phase-field energy ---
@@ -233,6 +232,15 @@ function compute_volume(u_vec::Vector{Float64}, g::Matrix{Float64}, l::Float64)
 end
 
 """
+    compute_volume_gradient(g, l)
+
+Return the gradient of `compute_volume` w.r.t. `u_vec`: ∂V/∂u[k] = g[k]·l².
+"""
+function compute_volume_gradient(g::Matrix{Float64}, l::Float64)
+    return vec(g) .* l^2
+end
+
+"""
     solve_volume_constrained(energy_fn, gradient_fn!, volume_fn, vol_grad, u0, vol_target;
                              tol_h=1e-7, max_outer=30, inner_iter=500,
                              c_init=10.0, verbose=false)
@@ -327,15 +335,15 @@ function solve_volume_constrained(
         h = V - vol_target
         E = energy_fn(u)
 
-        if verbose
-            @printf("%-6d │ %-14.4e │ %-12.4e │ %-12.4e\n", outer, E, abs(h), λ)
-        end
-
         abs(h) < tol_h && return u, λ
 
         λ += c * h
-        abs(h) > 0.25 * abs(h_prev) && (c *= 3.0)
+        abs(h) > 0.25 * abs(h_prev) && (c *= 2.0)
         h_prev = h
+
+        if verbose
+            @printf("%-6d │ %-14.4e │ %-12.4e │ %-12.4e\n", outer, E, abs(h), λ)
+        end
     end
 
     @warn "solve_volume_constrained: augmented Lagrangian did not converge to tol_h = $tol_h"

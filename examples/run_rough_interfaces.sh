@@ -1,0 +1,1 @@
+julia --project -e 'using Pkg; Pkg.add(["Pluto", "PlutoUI", "Plots"]); using Pluto; Pluto.run(notebook="examples/rough_interfaces.jl")'

@@ -2,6 +2,7 @@ using PhaseField
 using Test
 using Random
 using Optim
+using Statistics
 
 @testset "PhaseField Model Tests" begin
 
@@ -17,15 +18,6 @@ using Optim
         @test isapprox(compute_C(1e-7), compute_C(0.0), rtol=1e-6)
     end
 
-    @testset "generate_topography" begin
-        Nx, Ny = 32, 32
-        l = 0.01
-        h = generate_topography(Nx, Ny, l; amplitude=0.15*l, seed=42)
-        @test size(h) == (Nx, Ny)
-        @test maximum(h) <= 0.15 * l
-        @test minimum(h) >= -0.15 * l
-    end
-
     @testset "compute_volume" begin
         Nx, Ny = 16, 16
         l = 0.1
@@ -35,6 +27,26 @@ using Optim
         # Volume = sum(1.0 * 2.0 * l^2) = 16 * 16 * 2.0 * 0.01 = 5.12
         vol = compute_volume(vec(u), g, l)
         @test isapprox(vol, Nx * Ny * 2.0 * l^2, atol=1e-6)
+    end
+
+    @testset "compute_volume_gradient" begin
+        # ∂V/∂u[k] = g[k] * l²; verify against finite differences of compute_volume
+        Nx, Ny = 8, 8
+        l = 0.1
+        Random.seed!(5)
+        g = 1.0 .+ rand(Float64, Nx, Ny)
+        u_vec = rand(Float64, Nx * Ny)
+
+        vg = compute_volume_gradient(g, l)
+        @test size(vg) == (Nx * Ny,)
+
+        delta = 1e-6
+        for k in 1:Nx*Ny
+            u_p = copy(u_vec); u_p[k] += delta
+            u_m = copy(u_vec); u_m[k] -= delta
+            fd = (compute_volume(u_p, g, l) - compute_volume(u_m, g, l)) / (2delta)
+            @test isapprox(vg[k], fd, rtol=1e-6)
+        end
     end
 
     @testset "Energy and Gradient consistency — full gradient, uniform g" begin
@@ -136,7 +148,7 @@ using Optim
 
         vol_max    = z * Nx * Ny * l^2
         vol_target = 0.5 * vol_max
-        vol_grad   = vec(g) .* l^2
+        vol_grad   = compute_volume_gradient(g, l)
 
         # Stripe initial condition (satisfies volume constraint by symmetry)
         u0 = let
@@ -180,7 +192,7 @@ using Optim
 
         vol_max    = sum(g) * l^2
         vol_target = 0.5 * vol_max
-        vol_grad   = vec(g) .* l^2
+        vol_grad   = compute_volume_gradient(g, l)
 
         u0 = let
             u_tmp = Matrix{Float64}(undef, Nx, Ny)
@@ -206,5 +218,23 @@ using Optim
         @test all(u_sol .<= 1.0)
         @test isfinite(λ_sol)
     end
+
+    @testset "Roughness module accessible via PhaseField" begin
+        # Regression test: Roughness was not included in PhaseField.jl, making it
+        # unreachable after `using PhaseField`. Verify the submodule is exported.
+        @test isdefined(PhaseField, :Roughness)
+        @test PhaseField.Roughness === Roughness
+    end
+
+    @testset "fourier_synthesis — zero mean" begin
+        # Regression test: the DC component (karr[1,1]) was set to real() instead of 0,
+        # giving surfaces a random non-zero mean that corrupted the mean gap separation.
+        for seed in [1, 2, 3, 17, 42]
+            Random.seed!(seed)
+            h = Roughness.fourier_synthesis(64, 64, 1.0, 1.0, 0.8; rms_height=0.1)
+            @test isapprox(mean(h), 0.0, atol=1e-12)
+        end
+    end
+
 
 end
