@@ -159,7 +159,87 @@ using Statistics
         @test isapprox(E0, E1, rtol=1e-12)
     end
 
-    @testset "solve_volume_constrained — flat gap (parallel plates)" begin
+    @testset "_project_feasible — unit tests" begin
+        # Box + linear-equality projection. a ≥ 0.
+        a       = [1.0, 2.0, 3.0, 4.0]
+        V_tgt   = 5.0
+        # Already feasible: u=[1,1,0,0] gives ⟨a,u⟩ = 1 + 2 = 3. Not on target.
+        # Try u0 = [0.5, 0.5, 0.5, 0.5]: ⟨a,u⟩ = 5.0 — already on target, no box violations.
+        u = PhaseField._project_feasible([0.5, 0.5, 0.5, 0.5], a, V_tgt, nothing)
+        @test isapprox(sum(a .* u), V_tgt; atol=1e-12)
+        @test all(0 .<= u .<= 1)
+
+        # Starting point outside box: must clamp AND satisfy constraint.
+        u = PhaseField._project_feasible([2.0, -1.0, 0.5, 0.8], a, 4.0, nothing)
+        @test isapprox(sum(a .* u), 4.0; atol=1e-12)
+        @test all(0 .<= u .<= 1)
+
+        # Contact mask: masked indices must be zero and must NOT contribute
+        # to the sum (a_i = 0 there is automatic in the real use, but the
+        # projection's sum explicitly skips them; set a_contact = 0 as well).
+        contact  = Bool[false, false, true, false]
+        a_masked = [1.0, 2.0, 0.0, 4.0]
+        u = PhaseField._project_feasible([0.5, 0.5, 0.9, 0.5], a_masked, 3.0, contact)
+        @test u[3] == 0.0
+        @test isapprox(sum(a_masked .* u), 3.0; atol=1e-12)
+        @test all(0 .<= u .<= 1)
+    end
+
+    @testset "_tangent_project! — orthogonality" begin
+        # After the projection, ⟨a, d⟩ should be (numerically) zero.
+        Random.seed!(12345)
+        for N in (8, 64)
+            a   = rand(N) .+ 0.1
+            aTa = sum(a .^ 2)
+            d   = randn(N)
+            PhaseField._tangent_project!(d, a, aTa)
+            @test abs(sum(a .* d)) < 1e-12
+        end
+    end
+
+    @testset "_lagrange_multiplier — linear oracle" begin
+        # Construct ∇E = λ*·a + perp, with perp ⟂ a. The helper must recover λ*.
+        Random.seed!(42)
+        N = 16
+        a   = rand(N) .+ 0.5
+        aTa = sum(a .^ 2)
+        λ_true = 0.73
+        perp   = randn(N)
+        perp .-= (sum(a .* perp) / aTa) .* a    # make perp ⟂ a
+        Gu     = λ_true .* a .+ perp
+        @test isapprox(PhaseField._lagrange_multiplier(Gu, a, aTa), λ_true; atol=1e-12)
+    end
+
+    @testset "_lbfgs_direction — descent on a quadratic" begin
+        # With the identity initial Hessian (empty history), d = -g. With one
+        # well-posed (s, y) pair, d should still be a descent direction.
+        g = [1.0, 2.0, -3.0, 0.5]
+        d = PhaseField._lbfgs_direction(g, Vector{Vector{Float64}}(),
+                                         Vector{Vector{Float64}}(), Float64[])
+        @test d ≈ -g
+
+        s = [0.1, -0.2, 0.3, 0.05]
+        y = [0.2, -0.1, 0.6, 0.1]
+        sy = sum(s .* y)
+        d = PhaseField._lbfgs_direction(g, [s], [y], [1.0 / sy])
+        @test sum(g .* d) < 0   # descent direction
+    end
+
+    @testset "_kkt_residual — active-set masking" begin
+        u  = [0.0, 0.5, 1.0, 0.3]
+        Gp = [1.0, 0.2, -0.5, 0.0]   # u=0 Gp>0 → masked; u=1 Gp<0 → masked.
+        r  = PhaseField._kkt_residual(Gp, u, nothing)
+        @test r[1] == 0.0           # lower bound active, Gp ≥ 0 → satisfied
+        @test r[2] == 0.2           # interior, unmasked
+        @test r[3] == 0.0           # upper bound active, Gp ≤ 0 → satisfied
+        @test r[4] == 0.0           # interior but Gp=0
+
+        # Contact mask always zeroes.
+        r = PhaseField._kkt_residual(Gp, u, Bool[true, false, false, false])
+        @test r[1] == 0.0
+    end
+
+    @testset "solve_volume_constrained_bfgs — flat gap (parallel plates)" begin
         # Small grid (32×32) with uniform gap; solve at 50% filling.
         # Expect convergence and u ∈ [0,1].
         Nx, Ny = 32, 32
@@ -187,10 +267,9 @@ using Statistics
 
         energy_fn(u)      = phase_field_energy(u, g, ε, l, σ_val, C_σ)
         gradient_fn!(G,u) = phase_field_gradient!(G, u, g, ε, l, σ_val, C_σ)
-        volume_fn(u)      = compute_volume(u, g, l)
 
-        u_sol, λ_sol = solve_volume_constrained(
-            energy_fn, gradient_fn!, volume_fn, vol_grad, u0, vol_target;
+        u_sol, λ_sol = solve_volume_constrained_bfgs(
+            energy_fn, gradient_fn!, vol_grad, u0, vol_target;
             g_tol = 1e-6, verbose = false)
 
         V_sol = compute_volume(u_sol, g, l)
@@ -200,7 +279,7 @@ using Statistics
         @test isfinite(λ_sol)                           # Lagrange multiplier finite
     end
 
-    @testset "solve_volume_constrained — spatially varying gap" begin
+    @testset "solve_volume_constrained_bfgs — spatially varying gap" begin
         # Non-uniform gap to exercise the generalisation; check volume constraint only.
         Nx, Ny = 16, 16
         l      = 0.01
@@ -230,10 +309,9 @@ using Statistics
 
         energy_fn(u)      = phase_field_energy(u, g, ε, l, σ_val, C_σ)
         gradient_fn!(G,u) = phase_field_gradient!(G, u, g, ε, l, σ_val, C_σ)
-        volume_fn(u)      = compute_volume(u, g, l)
 
-        u_sol, λ_sol = solve_volume_constrained(
-            energy_fn, gradient_fn!, volume_fn, vol_grad, u0, vol_target;
+        u_sol, λ_sol = solve_volume_constrained_bfgs(
+            energy_fn, gradient_fn!, vol_grad, u0, vol_target;
             g_tol = 1e-5, verbose = false)
 
         V_sol = compute_volume(u_sol, g, l)
@@ -322,10 +400,9 @@ using Statistics
 
                 energy_fn(u)      = phase_field_energy(u, g, ε, l, σ_val, C_σ)
                 gradient_fn!(G,u) = phase_field_gradient!(G, u, g, ε, l, σ_val, C_σ)
-                volume_fn(u)      = compute_volume(u, g, l)
 
-                u_sol, λ_sol = solve_volume_constrained(
-                    energy_fn, gradient_fn!, volume_fn, vol_grad, u0, vol_target;
+                u_sol, λ_sol = solve_volume_constrained_bfgs(
+                    energy_fn, gradient_fn!, vol_grad, u0, vol_target;
                     contact = contact, g_tol = 1e-5, verbose = false)
 
                 # Volume constraint satisfied over the open-gap region

@@ -116,12 +116,11 @@ begin
 
     energy_fn(u)      = phase_field_energy(u, gap, ε, l, σ, C_σ)
     gradient_fn!(G,u) = phase_field_gradient!(G, u, gap, ε, l, σ, C_σ)
-    volume_fn(u)      = compute_volume(u, gap, l)
 
     g_tol_val = 1e-5
 
-    u, λ_final, residual = solve_volume_constrained(
-        energy_fn, gradient_fn!, volume_fn, vol_grad, u0, vol_target;
+    u, λ_final, residual = solve_volume_constrained_bfgs(
+        energy_fn, gradient_fn!, vol_grad, u0, vol_target;
         g_tol = g_tol_val, max_iter = max_iter_slider,
         verbose = false)
 

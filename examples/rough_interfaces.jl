@@ -38,10 +38,10 @@ The gap function $g(x)$ is defined as $g(x) = z + h_2(x) - h_1(x)$, where $z$ is
 md"## Parameters"
 
 # ╔═╡ 90918734-428b-931a-53b5-b4722c76bba1
-md"**Nx:** $(@bind Nx_slider Slider(64:64:512, default=64, show_value=true))"
+md"**Nx:** $(@bind Nx_slider Slider(64:64:2048, default=64, show_value=true))"
 
 # ╔═╡ 90918734-8e34-5092-49d9-44b3f89015e2
-md"**Ny:** $(@bind Ny_slider Slider(64:64:512, default=64, show_value=true))"
+md"**Ny:** $(@bind Ny_slider Slider(64:64:2048, default=64, show_value=true))"
 
 # ╔═╡ 90918734-833a-549b-8ae8-2e6abc2cc640
 md"**Contact angle θ (deg):** $(@bind θ_deg_slider Slider(0:5:180, default=60, show_value=true))"
@@ -159,12 +159,11 @@ begin
 
     energy_fn(u)      = phase_field_energy(u, gap, ε, l, σ, C_σ)
     gradient_fn!(G,u) = phase_field_gradient!(G, u, gap, ε, l, σ, C_σ)
-    volume_fn(u)      = compute_volume(u, gap, l)
 
     g_tol_val = 1e-5
 
-    u, λ_final, residual = solve_volume_constrained(
-        energy_fn, gradient_fn!, volume_fn, vol_grad, u0, vol_target;
+    u, λ_final, residual = solve_volume_constrained_bfgs(
+        energy_fn, gradient_fn!, vol_grad, u0, vol_target;
         contact = vec(overlap), g_tol = g_tol_val, verbose = false)
 
     V_fin = compute_volume(u, gap, l)

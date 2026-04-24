@@ -8,7 +8,7 @@ include("Roughness.jl")
 using .Roughness
 
 export compute_C, phase_field_energy, phase_field_gradient!,
-    compute_volume, compute_volume_gradient, solve_volume_constrained,
+    compute_volume, compute_volume_gradient, solve_volume_constrained_bfgs,
     square_initial, Roughness
 
 # --- Potential and normalisation ---
@@ -331,18 +331,24 @@ function _project_feasible(y::Vector{Float64}, a::Vector{Float64},
         Φ_hi = Φ(μ_hi)
     end
 
-    # Bisect. 60 steps squeeze a `1e6` bracket below eps(Float64).
+    # Bisect. 60 steps squeeze a `1e6` bracket below eps(Float64). If Φ(μ_mid)
+    # hits the tolerance exactly, μ_mid is the answer — *not* the midpoint of
+    # the bracket, which could still straddle it. (Early bisection with e.g.
+    # Φ(0) = 0 exactly would otherwise leave the bracket wide.)
+    μ = 0.5 * (μ_lo + μ_hi)
     for _ in 1:60
         μ_mid = 0.5 * (μ_lo + μ_hi)
         Φ_mid = Φ(μ_mid)
-        if Φ_mid > 0.0
+        if abs(Φ_mid) < tol
+            μ = μ_mid
+            break
+        elseif Φ_mid > 0.0
             μ_lo = μ_mid
         else
             μ_hi = μ_mid
         end
-        abs(Φ_mid) < tol && break
+        μ = 0.5 * (μ_lo + μ_hi)
     end
-    μ = 0.5 * (μ_lo + μ_hi)
 
     @inbounds for i in 1:N
         u[i] = (has_contact && contact[i]) ? 0.0 : clamp(y[i] - μ * a[i], 0.0, 1.0)
@@ -407,12 +413,65 @@ function _kkt_residual(Gp::Vector{Float64}, u::Vector{Float64}, contact;
 end
 
 """
-    solve_volume_constrained(energy_fn, gradient_fn!, volume_fn, vol_grad, u0, vol_target;
-                             contact=nothing,
-                             g_tol=1e-7,
-                             max_iter=500,
-                             lbfgs_memory=10,
-                             verbose=false)
+    _lagrange_multiplier(Gu, a, aTa) -> λ
+
+Closed-form Lagrange multiplier for a linear equality constraint `⟨a, u⟩ = V*`:
+`λ = ⟨a, ∇E⟩ / ⟨a, a⟩`. Because the constraint is linear, no iteration is needed —
+this exact formula replaces the augmented-Lagrangian outer loop.
+"""
+_lagrange_multiplier(Gu::Vector{Float64}, a::Vector{Float64}, aTa::Float64) =
+    dot(a, Gu) / aTa
+
+"""
+    _tangent_project!(d, a, aTa) -> d
+
+In-place remove the `a`-component of `d`: `d ← d − (⟨a,d⟩/⟨a,a⟩) a`. The result is
+orthogonal to `a`, so taking any step along it preserves `⟨a, u⟩ = V*` up to first order
+(the subsequent box projection fixes any drift from active-set clipping).
+"""
+function _tangent_project!(d::Vector{Float64}, a::Vector{Float64}, aTa::Float64)
+    c = dot(a, d) / aTa
+    @inbounds for i in eachindex(d)
+        d[i] -= c * a[i]
+    end
+    return d
+end
+
+"""
+    _armijo_backtrack(u, d, Gp, E, a, vol_target, contact, energy_fn;
+                      α_init=1.0, c1=1e-4, max_halvings=40)
+        -> (u_new, E_new, α) | nothing
+
+Projected backtracking line search. Tries `α ← α_init, α_init/2, α_init/4, ...` up to
+`max_halvings` times; for each α, forms the candidate `u_try = Π_F(u + α·d)` and accepts
+it if the Armijo condition `E(u_try) ≤ E + c1·α·⟨Gp, d⟩` holds. Returns `(u_try, E_try, α)`
+on success and `nothing` on failure.
+"""
+function _armijo_backtrack(u::Vector{Float64}, d::Vector{Float64}, Gp::Vector{Float64},
+                            E::Float64, a::Vector{Float64}, vol_target::Float64,
+                            contact, energy_fn;
+                            α_init::Float64=1.0, c1::Float64=1e-4,
+                            max_halvings::Int=40)
+    gd = dot(Gp, d)
+    α  = α_init
+    for _ in 1:max_halvings
+        u_try = _project_feasible(u .+ α .* d, a, vol_target, contact)
+        E_try = energy_fn(u_try)
+        if E_try <= E + c1 * α * gd
+            return (u_try, E_try, α)
+        end
+        α *= 0.5
+    end
+    return nothing
+end
+
+"""
+    solve_volume_constrained_bfgs(energy_fn, gradient_fn!, vol_grad, u0, vol_target;
+                                   contact=nothing,
+                                   g_tol=1e-5,
+                                   max_iter=500,
+                                   lbfgs_memory=10,
+                                   verbose=false)
 
 Minimise `energy_fn(u)` subject to `⟨vol_grad, u⟩ = vol_target` and `0 ≤ u ≤ 1` by
 **projected L-BFGS** on the feasible polytope `F = [0,1]^N ∩ {aᵀu = V*}`.
@@ -427,8 +486,6 @@ form for a linear equality plus box bounds) so the iterates are *exactly feasibl
 # Arguments
 - `energy_fn`    : `u → Float64` — objective energy.
 - `gradient_fn!` : `(G, u)` — fills `G` with `∂energy/∂u` (the callee zeroes `G` first).
-- `volume_fn`    : kept for signature stability; unused by the projected solver since
-                   `⟨vol_grad, u⟩` is held at `vol_target` by projection.
 - `vol_grad`     : gradient of the linear volume functional `V[u] = ⟨vol_grad, u⟩`;
                    use `compute_volume_gradient(g, lx, ly)`.
 - `u0`           : initial phase-field (will be projected onto `F` before the loop).
@@ -451,10 +508,9 @@ multiplier (computed in closed form at the last iterate), and `residual` is the
 final ∞-norm of the box-masked tangent-projected gradient. By construction
 `⟨vol_grad, u⟩ = vol_target` to within projection precision (≈ 1e-14).
 """
-function solve_volume_constrained(
+function solve_volume_constrained_bfgs(
     energy_fn,
     gradient_fn!,
-    volume_fn,   # unused; retained for backward-compat call signature
     vol_grad::Vector{Float64},
     u0::Vector{Float64},
     vol_target::Float64;
@@ -469,92 +525,73 @@ function solve_volume_constrained(
     @assert aTa > 0 "vol_grad is identically zero; no volume constraint to enforce"
     has_contact = !isnothing(contact) && any(contact)
 
-    # Feasible starting iterate
-    u = _project_feasible(u0, a, vol_target, contact)
-    N = length(u)
+    # Feasible starting iterate and initial tangent gradient.
+    u  = _project_feasible(u0, a, vol_target, contact)
+    N  = length(u)
     Gu = zeros(N)
     gradient_fn!(Gu, u)
-    λ = dot(a, Gu) / aTa
+    λ  = _lagrange_multiplier(Gu, a, aTa)
     Gp = Gu .- λ .* a
     has_contact && (Gp[contact] .= 0.0)
-
-    E = energy_fn(u)
+    E  = energy_fn(u)
     r_norm = maximum(abs, _kkt_residual(Gp, u, contact))
 
-    # Most-recent-first circular buffer of curvature pairs.
+    # Most-recent-first history of curvature pairs.
     s_hist = Vector{Vector{Float64}}()
     y_hist = Vector{Vector{Float64}}()
     ρ_hist = Float64[]
+    reset_history!() = (empty!(s_hist); empty!(y_hist); empty!(ρ_hist))
 
     if verbose
-        @printf("%-5s │ %-14s │ %-12s │ %-12s │ %-6s\n", "iter", "energy", "‖Gₚ‖_free", "λ", "α")
+        @printf("%-5s │ %-14s │ %-12s │ %-12s │ %-6s\n", "iter", "energy", "‖Gₚ‖∞_free", "λ", "α")
         println("─"^64)
         @printf("%-5d │ %-14.6e │ %-12.4e │ %-12.4e │ %-6s\n", 0, E, r_norm, λ, "-")
     end
-
     r_norm < g_tol && return u, λ, r_norm
 
     for iter in 1:max_iter
-        # L-BFGS search direction, then re-tangent-project (small numerical drift).
+        # 1. Search direction: L-BFGS quasi-Newton, re-tangent-projected against
+        #    numerical drift, with contact nodes pinned.
         d = _lbfgs_direction(Gp, s_hist, y_hist, ρ_hist)
-        d .-= (dot(a, d) / aTa) .* a
+        _tangent_project!(d, a, aTa)
         has_contact && (d[contact] .= 0.0)
 
-        gd = dot(Gp, d)
-        if gd >= 0.0
-            # Not a descent direction (stale curvature): reset and try -Gp.
-            empty!(s_hist); empty!(y_hist); empty!(ρ_hist)
-            d  = -Gp
-            gd = dot(Gp, d)
+        # 2. Reset history if d is not a descent direction (stale curvature).
+        if dot(Gp, d) >= 0.0
+            reset_history!()
+            d = -Gp
+            has_contact && (d[contact] .= 0.0)
         end
 
-        # Backtracking line search with projection. The projection arc changes d
-        # after clipping, so we check the plain Armijo condition E_new ≤ E+c1·α·gd.
-        # If the L-BFGS direction fails (e.g. the active set just changed and the
-        # stored curvature is stale), reset history and retry with scaled steepest
-        # descent before giving up.
-        α_init   = 1.0
-        c1       = 1e-4
-        u_new    = u
-        E_new    = E
-        accepted = false
-
-        for attempt in 1:2
-            α = α_init
-            for _ in 1:40
-                u_try = _project_feasible(u .+ α .* d, a, vol_target, contact)
-                E_try = energy_fn(u_try)
-                if E_try <= E + c1 * α * gd
-                    u_new, E_new = u_try, E_try
-                    accepted = true
-                    break
-                end
-                α *= 0.5
-            end
-            accepted && break
-            # Retry with steepest descent, scaled so the first trial step has
-            # a reasonable magnitude instead of possibly blowing past the minimum.
-            empty!(s_hist); empty!(y_hist); empty!(ρ_hist)
-            d      = -Gp
-            gd     = dot(Gp, d)
+        # 3. Backtracking line search with projection. If it fails (typically
+        #    because the active set just changed), reset and retry with scaled
+        #    steepest descent before declaring failure.
+        step = _armijo_backtrack(u, d, Gp, E, a, vol_target, contact, energy_fn)
+        if step === nothing
+            reset_history!()
+            d = -Gp
+            has_contact && (d[contact] .= 0.0)
             gp_n   = norm(Gp)
             α_init = gp_n > 0 ? 1.0 / gp_n : 1.0
+            step = _armijo_backtrack(u, d, Gp, E, a, vol_target, contact, energy_fn;
+                                     α_init=α_init)
         end
-        if !accepted
+        if step === nothing
             verbose && @warn "line search failed at iter $iter (residual $r_norm)"
             break
         end
+        u_new, E_new, α = step
 
-        # New gradient and tangent projection.
+        # 4. Recompute the tangent gradient at u_new.
         Gu_new = zeros(N)
         gradient_fn!(Gu_new, u_new)
-        λ_new  = dot(a, Gu_new) / aTa
+        λ_new  = _lagrange_multiplier(Gu_new, a, aTa)
         Gp_new = Gu_new .- λ_new .* a
         has_contact && (Gp_new[contact] .= 0.0)
 
-        # Update L-BFGS history (only if the curvature pair is well-defined).
-        s = u_new .- u
-        y = Gp_new .- Gp
+        # 5. Push the new curvature pair (only if it's well-defined).
+        s  = u_new .- u
+        y  = Gp_new .- Gp
         sy = dot(s, y)
         if sy > 1e-12 * (norm(s) * norm(y) + eps())
             pushfirst!(s_hist, s); pushfirst!(y_hist, y); pushfirst!(ρ_hist, 1.0 / sy)
@@ -563,36 +600,27 @@ function solve_volume_constrained(
             end
         end
 
-        u, Gu, Gp, λ, E = u_new, Gu_new, Gp_new, λ_new, E_new
+        u, Gp, λ, E = u_new, Gp_new, λ_new, E_new
         r_norm = maximum(abs, _kkt_residual(Gp, u, contact))
 
         verbose && @printf("%-5d │ %-14.6e │ %-12.4e │ %-12.4e │ %-6.2e\n", iter, E, r_norm, λ, α)
-
         r_norm < g_tol && return u, λ, r_norm
     end
 
-    @warn "solve_volume_constrained: projected L-BFGS did not converge (‖Gₚ‖_free = $r_norm > $g_tol)"
+    @warn "solve_volume_constrained_bfgs: projected L-BFGS did not converge (‖Gₚ‖∞_free = $r_norm > $g_tol)"
     return u, λ, r_norm
 end
 
 """
-    square_initial(Nx, Ny, l, ε, vol_fraction; clamp_range=(0.02, 0.98))
+    square_initial(Nx, Ny, l, ε, vol_fraction)
 
-Smooth square-droplet initial condition on a periodic `Nx × Ny` grid with spacing
-`l`. The square is centred in the domain with side length
-`√(vol_fraction · Nx · Ny · l²)` so its area equals `vol_fraction · |ω|`; the
-edges are smoothed by `tanh` with width `ε`.
-
-`clamp_range = (lo, hi)` clamps the returned values away from the saturation endpoints
-`0` and `1`. Not required by the projected-L-BFGS solver (which handles the box
-constraint natively), but retained as a mild safeguard for users who plug the output into
-other optimisers. Pass `clamp_range = nothing` to disable the clamp.
+Smooth square-droplet initial condition on a periodic `Nx × Ny` grid with spacing `l`.
+The square is centred in the domain with side length `√(vol_fraction · Nx · Ny · l²)`
+so its area equals `vol_fraction · |ω|`; the edges are smoothed by `tanh` with width `ε`.
 
 Returns a `Vector{Float64}` of length `Nx·Ny` (column-major).
 """
-function square_initial(Nx::Int, Ny::Int, l::Float64, ε::Float64,
-                        vol_fraction::Float64;
-                        clamp_range::Union{Nothing,Tuple{Float64,Float64}}=(0.02, 0.98))
+function square_initial(Nx::Int, Ny::Int, l::Float64, ε::Float64, vol_fraction::Float64)
     u  = Matrix{Float64}(undef, Nx, Ny)
     Lx = Nx * l
     Ly = Ny * l
@@ -607,10 +635,6 @@ function square_initial(Nx::Int, Ny::Int, l::Float64, ε::Float64,
             uy = 0.5 * (tanh((y - (yc - a/2)) / ε) - tanh((y - (yc + a/2)) / ε))
             u[i, j] = ux * uy
         end
-    end
-    if clamp_range !== nothing
-        lo, hi = clamp_range
-        u .= clamp.(u, lo, hi)
     end
     return vec(u)
 end

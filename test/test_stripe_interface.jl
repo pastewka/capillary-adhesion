@@ -211,14 +211,13 @@ end
 
     energy_fn(u)       = phase_field_energy(u, g, ε, l, σ, C_σ)
     gradient_fn!(G, u) = phase_field_gradient!(G, u, g, ε, l, σ, C_σ)
-    volume_fn(u)       = compute_volume(u, g, l)
 
     for (angle, label) in [(0, "0°"), (90, "90°"), (45, "45°"), (135, "135°")]
         @testset "$label stripe" begin
             u0 = vec(stripe_initial(N, angle, l, ε_init))
 
-            u_opt, _ = solve_volume_constrained(
-                energy_fn, gradient_fn!, volume_fn, vgrad, u0, vtarget;
+            u_opt, _ = solve_volume_constrained_bfgs(
+                energy_fn, gradient_fn!, vgrad, u0, vtarget;
                 g_tol = 1e-6, verbose = false)
             u_2d = reshape(u_opt, N, N)
 
@@ -266,7 +265,6 @@ end
 
     energy_fn(u)       = phase_field_energy(u, g, ε, lx, ly, σ, C_σ)
     gradient_fn!(G, u) = phase_field_gradient!(G, u, g, ε, lx, ly, σ, C_σ)
-    volume_fn(u)       = compute_volume(u, g, lx, ly)
 
     # Only the axis-aligned orientations (0°, 90°) are stable on an anisotropic
     # grid: both give perimeter 2·Ly = 2·Lx = 2 (physical domain is square),
@@ -282,8 +280,8 @@ end
         @testset "$label stripe" begin
             u0 = vec(stripe_initial(Nx, Ny, angle, lx, ly, ε_init))
 
-            u_opt, _ = solve_volume_constrained(
-                energy_fn, gradient_fn!, volume_fn, vgrad, u0, vtarget;
+            u_opt, _ = solve_volume_constrained_bfgs(
+                energy_fn, gradient_fn!, vgrad, u0, vtarget;
                 g_tol = 1e-6, verbose = false)
             u_2d = reshape(u_opt, Nx, Ny)
 
