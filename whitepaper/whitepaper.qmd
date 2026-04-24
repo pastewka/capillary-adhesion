@@ -26,14 +26,14 @@ This document describes the mathematical formulation and numerical implementatio
 dimensionally-reduced phase-field model for capillary bridges confined between two solid plates.
 The physics is implemented in two languages:
 
-- **Julia** (`src/PhaseField.jl`): reference implementation with an explicit loop-level FEM assembly and augmented-Lagrangian solver.
+- **Julia** (`src/PhaseField.jl`): reference implementation with an explicit loop-level FEM assembly and projected-L-BFGS solver.
 - **Python** (`capillary-adhesion/a_package/`): sparse-matrix formulation of the same FEM, with an object-oriented optimizer interface.
 
 Both implementations solve the same mathematical problem. The Julia version is used to produce
 the simulation results in the associated paper; the Python version serves as an independently
 validated reference and is designed for large parameter sweeps.
 
-# Physical Setup
+# Physical Setup {#sec-physical-setup}
 
 Consider a periodic two-dimensional domain $\omega = [0, L_x) \times [0, L_y)$ representing
 the in-plane coordinates of a thin liquid film confined between two rigid solid plates.
@@ -54,6 +54,12 @@ representing fully liquid and $u = 0$ representing vapour.  The liquid volume is
 $$
 V[u] = \int_\omega u(\mathbf{x})\, g(\mathbf{x})\, d\mathbf{x}.
 $$
+
+The physical condition $u(\mathbf{x}) = 0$ wherever $g(\mathbf{x}) = 0$ (no liquid in contact
+regions) is enforced numerically as a hard constraint on the contact nodes of the
+discretisation; see @sec-contact-mask.  With this constraint in place, the wetting integrand
+$2\sigma u$ (introduced below) automatically vanishes in the contact set, so the energy
+functional is written without an explicit indicator function on $\{g > 0\}$.
 
 # Phase-Field Energy Functional
 
@@ -122,8 +128,11 @@ $$
 ## Periodic Grid
 
 The domain $\omega$ is discretized by a uniform periodic grid of $N_x \times N_y$ nodes
-with spacing $l$ in both directions ($L_x = N_x l$, $L_y = N_y l$).  Node $(i,j)$ has
-coordinates $(il, jl)$, with indices taken modulo $N_x$ and $N_y$ respectively.
+with spacings $l_x$ in the $x$-direction and $l_y$ in the $y$-direction
+($L_x = N_x l_x$, $L_y = N_y l_y$).  Node $(i,j)$ has coordinates $(i l_x,\, j l_y)$, with
+indices taken modulo $N_x$ and $N_y$ respectively.  The isotropic (square-grid) case
+$l_x = l_y \equiv l$ is the common default; all formulas below reduce to the familiar
+square-grid expressions under that choice.
 
 ## Triangulation
 
@@ -143,7 +152,8 @@ Each pixel $(i,j)$ is divided into two triangles by the diagonal from $(i+1,j)$ 
 ## P1 Shape Functions and Centroid Quadrature
 
 P1 (piecewise-linear) basis functions are used.  Centroid quadrature places one integration
-point per triangle at the centroid, with weight $\tfrac{1}{2}l^2$ (the area of one triangle):
+point per triangle at the centroid, with weight equal to the triangle area
+$A_{\triangle} = \tfrac{1}{2} l_x l_y$:
 
 | Triangle | Centroid $(x_1,x_2)$ | Shape-function values at centroid |
 |----------|----------------------|-----------------------------------|
@@ -151,37 +161,60 @@ point per triangle at the centroid, with weight $\tfrac{1}{2}l^2$ (the area of o
 | $T_1$ | $(2/3,\; 2/3)$ | $N_{(i+1,j+1)} = N_{(i+1,j)} = N_{(i,j+1)} = 1/3$ |
 
 The interpolated phase value at each centroid is therefore the arithmetic mean of the three
-corner nodal values.
+corner nodal values, and likewise for the gap:
+$$
+u_q^{T_0} = \frac{u_{i,j} + u_{i+1,j} + u_{i,j+1}}{3},\qquad
+g_q^{T_0} = \frac{g_{i,j} + g_{i+1,j} + g_{i,j+1}}{3},
+$$
+with analogous expressions for $T_1$ using the three corners $(i+1,j+1), (i+1,j), (i,j+1)$.
 
 ## Gradient Interpolation
 
-P1 gradients are constant per triangle.  Dividing the finite differences by the element size $l$:
+P1 gradients are constant per triangle.  Dividing the appropriate finite differences by the
+element size in each direction:
 
 | Triangle | $\partial u/\partial x$ | $\partial u/\partial y$ |
 |----------|-------------------------|-------------------------|
-| $T_0$ | $(u_{i+1,j} - u_{i,j})/l$ | $(u_{i,j+1} - u_{i,j})/l$ |
-| $T_1$ | $(u_{i+1,j+1} - u_{i,j+1})/l$ | $(u_{i+1,j+1} - u_{i+1,j})/l$ |
+| $T_0$ | $(u_{i+1,j} - u_{i,j})/l_x$ | $(u_{i,j+1} - u_{i,j})/l_y$ |
+| $T_1$ | $(u_{i+1,j+1} - u_{i,j+1})/l_x$ | $(u_{i+1,j+1} - u_{i+1,j})/l_y$ |
 
 ## Discrete Energy
 
-Assembling over all pixels and both triangles per pixel, with quadrature weight $l^2/2$:
+Assembling over all pixels and both triangles per pixel, with quadrature weight
+$A_{\triangle} = l_x l_y / 2$:
 $$
-I_\varepsilon^h[\mathbf{u}] = \frac{l^2}{2} \sum_{i=0}^{N_x-1} \sum_{j=0}^{N_y-1}
+I_\varepsilon^h[\mathbf{u}] = \frac{l_x l_y}{2} \sum_{i=0}^{N_x-1} \sum_{j=0}^{N_y-1}
 \sum_{k \in \{0,1\}} e\!\left(u_q^k,\; g_q^k,\; \nabla u_q^k\right),
 $$
 where $(u_q^k, g_q^k, \nabla u_q^k)$ denote the phase, gap, and gradient at the centroid
 of triangle $k$ in pixel $(i,j)$, and the local energy density is
 $$
-e(u, g, \nabla u) = g\, C(\sigma)\, \frac{3}{\phantom{1}}\!\left(\varepsilon |\nabla u|^2 + \frac{W(u)}{\varepsilon}\right) + 2\sigma\, u.
+e(u, g, \nabla u) = g\, C(\sigma)\cdot 3\!\left(\varepsilon |\nabla u|^2 + \frac{W(u)}{\varepsilon}\right) + 2\sigma\, u.
 $$
+No explicit $\{g > 0\}$ indicator appears: as noted in @sec-physical-setup, the hard constraint
+$u = 0$ at contact nodes makes the wetting contribution $2\sigma u_q$ vanish in all-contact
+triangles, and gives the correct FEM quadrature of $2\sigma u$ on the open set for partial-contact
+triangles (contact-corner nodes contribute $0$ to the centroid average, the open-corner nodes
+contribute their values).
 
 ## Discrete Volume
 
-The volume integral is approximated by a nodal (cell-centred) quadrature rule:
+The volume integral is evaluated by the *same* P1 centroid quadrature as the energy, so that
+the volume constraint and the energy see consistent integrands:
 $$
-V^h[\mathbf{u}] = l^2 \sum_{i,j} u_{i,j}\, g_{i,j}.
+V^h[\mathbf{u}] = \frac{l_x l_y}{2}
+\sum_{i,j} \sum_{k \in \{0,1\}} u_q^k\, g_q^k.
 $$
-The gradient with respect to $u_{i,j}$ is simply $\partial V^h / \partial u_{i,j} = g_{i,j}\, l^2$.
+The gradient with respect to $u_{i,j}$ is obtained by the adjoint of the centroid interpolation:
+each of the six triangles incident to node $(i,j)$ contributes $\tfrac{A_{\triangle}}{3}\, g_q^k$,
+giving a locally $g$-smoothed gradient
+$$
+\frac{\partial V^h}{\partial u_{i,j}} = \frac{l_x l_y}{6}
+\sum_{\triangle \ni (i,j)} g_q^{\triangle}.
+$$
+For spatially uniform $g$ this reduces to $g\, l_x l_y$ (matching a nodal sum under
+periodicity); for spatially varying $g$ it differs from a naive nodal sum
+$g_{i,j}\, l_x l_y$ by $O(l_x, l_y)$ but is the quadrature-consistent choice.
 
 # Energy Gradient: Adjoint Assembly
 
@@ -199,13 +232,17 @@ $$
 \qquad
 \frac{\partial e}{\partial (\nabla u)_\alpha} = g_q\, C(\sigma)\cdot 3\cdot 2\varepsilon\,(\nabla u_q)_\alpha,
 $$
-where $dW/du = 2u(1-u)(1-2u)$.
+where $dW/du = 2u(1-u)(1-2u)$.  Note that the wetting sensitivity $2\sigma$ is applied
+unconditionally — the hard constraint $u = 0$ at contact nodes (@sec-contact-mask) zeroes
+both the value and the adjoint gradient at those nodes, so the contact region contributes
+nothing to the accumulated energy or its gradient.
 
-Multiplied by $l^2/2$ and accumulated into the nodal gradient via the transpose of the interpolation operators:
+Multiplied by the triangle area $A_{\triangle} = l_x l_y / 2$ and accumulated into the nodal
+gradient via the transpose of the interpolation operators:
 
-- **From value**: each of the three corner nodes receives $\frac{l^2/2}{3} \cdot \frac{\partial e}{\partial u_q}$.
-- **From $x$-gradient**: node $(i+1,j)$ receives $+\frac{l^2/2}{l} \cdot \frac{\partial e}{\partial (\nabla u)_x}$; node $(i,j)$ receives $-$ the same.
-- **From $y$-gradient**: node $(i,j+1)$ receives $+\frac{l^2/2}{l} \cdot \frac{\partial e}{\partial (\nabla u)_y}$; node $(i,j)$ receives $-$ the same.
+- **From value**: each of the three corner nodes receives $\frac{A_{\triangle}}{3} \cdot \frac{\partial e}{\partial u_q}$.
+- **From $x$-gradient**: node $(i+1,j)$ receives $+\frac{A_{\triangle}}{l_x} \cdot \frac{\partial e}{\partial (\nabla u)_x}$; node $(i,j)$ receives $-$ the same.
+- **From $y$-gradient**: node $(i,j+1)$ receives $+\frac{A_{\triangle}}{l_y} \cdot \frac{\partial e}{\partial (\nabla u)_y}$; node $(i,j)$ receives $-$ the same.
 
 Triangle $T_1$ contributes analogously.  The periodicity is handled by wrapping indices
 modulo $N_x$ and $N_y$.
@@ -229,104 +266,185 @@ This avoids Python loops over pixels and enables efficient batch evaluation.
 
 # Volume-Constrained Solver
 
-## Augmented Lagrangian Method
+## Projected L-BFGS on the Feasible Polytope
 
-The equality constraint $V[\mathbf{u}] = V^*$ is handled by an augmented Lagrangian outer loop.
-Define the augmented Lagrangian:
+The FEM volume functional $V^h[\mathbf{u}] = \langle \mathbf{a}, \mathbf{u} \rangle$ (with
+$\mathbf{a} = \nabla_{\mathbf{u}} V^h \ge 0$ as derived above) is **linear** in $\mathbf{u}$,
+so the feasible set
 $$
-\mathcal{L}(\mathbf{u};\,\lambda, c) = I_\varepsilon^h[\mathbf{u}]
-+ \lambda\bigl(V^h[\mathbf{u}] - V^*\bigr)
-+ \frac{c}{2}\bigl(V^h[\mathbf{u}] - V^*\bigr)^2,
+\mathcal{F} \;=\; \bigl\{\mathbf{u} \in [0,1]^N \;:\; \langle \mathbf{a}, \mathbf{u} \rangle = V^*\bigr\}
 $$
-with Lagrange multiplier $\lambda$ (physically: the Laplace pressure) and penalty weight $c > 0$.
+is a convex polytope (box intersected with a single affine hyperplane).  Because the
+constraint is linear, the Lagrange multiplier is available in closed form at every iterate:
+$$
+\lambda(\mathbf{u}) \;=\; \frac{\langle \mathbf{a}, \nabla I_\varepsilon^h(\mathbf{u}) \rangle}
+                              {\langle \mathbf{a}, \mathbf{a} \rangle},
+$$
+and no outer-loop, penalty-ramping, or augmented-Lagrangian machinery is needed.  The
+**tangent-projected gradient**
+$$
+\mathbf{G}_{\!p}(\mathbf{u}) \;=\; \nabla I_\varepsilon^h(\mathbf{u}) \;-\; \lambda(\mathbf{u})\,\mathbf{a}
+$$
+is orthogonal to $\mathbf{a}$ and drives a standard two-loop L-BFGS update.
 
-**Algorithm:**
+## Projection Onto $\mathcal{F}$ {#sec-projection}
 
-1. Initialize $\lambda^{(0)} = 0$, $c^{(0)} = c_0$, $\mathbf{u}^{(0)}$.
-2. For outer iteration $k = 0, 1, \ldots$:
-   a. Solve $\mathbf{u}^{(k+1)} = \arg\min_{\mathbf{u} \in [0,1]^{N}} \mathcal{L}(\mathbf{u};\,\lambda^{(k)}, c^{(k)})$ using box-constrained L-BFGS.
-   b. Compute constraint violation $h^{(k+1)} = V^h[\mathbf{u}^{(k+1)}] - V^*$.
-   c. If $|h^{(k+1)}| < \tau_h$: converged; return $(\mathbf{u}^{(k+1)}, \lambda^{(k)})$.
-   d. Update $\lambda^{(k+1)} = \lambda^{(k)} + c^{(k)} h^{(k+1)}$.
-   e. If $|h^{(k+1)}| > \tfrac{1}{4}|h^{(k)}|$: set $c^{(k+1)} = 2c^{(k)}$ (double penalty if insufficient progress).
+Given a candidate point $\mathbf{y} \in \mathbb{R}^N$, its $\ell^2$-projection onto
+$\mathcal{F}$ has the closed form
+$$
+\Pi_{\mathcal{F}}(\mathbf{y})_i \;=\; \mathrm{clip}\bigl(y_i - \mu\, a_i,\; 0,\; 1\bigr),
+$$
+where $\mu$ is the unique scalar satisfying the (one-dimensional, monotone) equation
+$$
+\Phi(\mu) \;\equiv\; \sum_{i=1}^{N} a_i \cdot \mathrm{clip}\bigl(y_i - \mu\, a_i,\; 0,\; 1\bigr) \;-\; V^* \;=\; 0.
+$$
+Since $a_i \ge 0$, $\Phi$ is non-increasing in $\mu$ with $\Phi(-\infty) = \sum_i a_i - V^* \ge 0$
+and $\Phi(+\infty) = -V^* \le 0$, so bisection (≈60 iterations squeezes any practical bracket
+below Float64 precision) finds $\mu$ cheaply.  Contact nodes ($g_i = 0 \Rightarrow a_i = 0$) drop out
+of both the sum and the clip — they are held at $u_i = 0$ explicitly.
 
-**Gradient** of $\mathcal{L}$ w.r.t. $\mathbf{u}$:
-$$
-\nabla_{\mathbf{u}} \mathcal{L} = \nabla_{\mathbf{u}} I_\varepsilon^h
-+ \bigl(\lambda + c(V^h - V^*)\bigr)\, \nabla_{\mathbf{u}} V^h.
-$$
-Since $\nabla_{\mathbf{u}} V^h$ is the constant vector with components $g_{i,j}\,l^2$, this
-requires only one additional scalar–vector multiply per gradient evaluation.
+## Algorithm
 
-## Box Constraints via Sigmoid Reparametrization (Julia)
+1. Initialise: $\mathbf{u}^{(0)} \leftarrow \Pi_{\mathcal{F}}(\mathbf{u}_{\mathrm{start}})$;
+   compute $\mathbf{G}_{\!p}^{(0)}$.
+2. For $k = 0, 1, \ldots$:
+   a. Search direction $\mathbf{d}^{(k)}$: two-loop L-BFGS recursion on
+      $(\mathbf{s}^{(j)}, \mathbf{y}^{(j)})$ pairs with $j = k-1, \ldots, k-m$
+      ($m$ = memory length, default 10); then re-project $\mathbf{d}$ onto the tangent
+      space of the linear constraint
+      ($\mathbf{d} \leftarrow \mathbf{d} - \frac{\langle\mathbf{a},\mathbf{d}\rangle}{\langle\mathbf{a},\mathbf{a}\rangle}\mathbf{a}$)
+      to absorb numerical drift.  If $\mathbf{d}$ is not a descent direction, reset the L-BFGS
+      history and use $\mathbf{d} = -\mathbf{G}_{\!p}^{(k)}$.
+   b. Backtracking line search with projection arc:
+      $\mathbf{u}^{(k+1)} = \Pi_{\mathcal{F}}(\mathbf{u}^{(k)} + \alpha\,\mathbf{d}^{(k)})$,
+      halving $\alpha$ until the Armijo condition
+      $I_\varepsilon^h(\mathbf{u}^{(k+1)}) \le I_\varepsilon^h(\mathbf{u}^{(k)}) + c_1 \alpha \langle\mathbf{G}_{\!p}^{(k)},\mathbf{d}^{(k)}\rangle$
+      is satisfied.  On line-search failure (e.g. the active set just changed), reset the
+      L-BFGS memory and retry with $\mathbf{d} = -\mathbf{G}_{\!p}^{(k)}$ and an initial
+      step scaled to unit norm.
+   c. Update curvature pair
+      $\mathbf{s}^{(k)} = \mathbf{u}^{(k+1)} - \mathbf{u}^{(k)}$,
+      $\mathbf{y}^{(k)} = \mathbf{G}_{\!p}^{(k+1)} - \mathbf{G}_{\!p}^{(k)}$
+      (only stored if $\langle\mathbf{s}, \mathbf{y}\rangle > 0$).
+   d. Converged when $\|\mathbf{G}_{\!p}^{(k+1)}\|_\infty^{\mathrm{free}} < g_\mathrm{tol}$,
+      where the $\infty$-norm is taken over *free* components only
+      (those not pinned by the box: a node with $u = 0$ and $\partial_u I \ge 0$ or
+      $u = 1$ and $\partial_u I \le 0$ is masked out).  The $\infty$-norm is used in place
+      of the 2-norm because it is scale-invariant in $N$ — the same `g_tol` value is
+      meaningful across grid sizes.
 
-The Julia implementation enforces $u \in (0,1)$ by reparametrizing $u = \sigma(v)$
-where $\sigma(v) = (1 + e^{-v})^{-1}$ is the sigmoid (logistic) function.  The unconstrained
-variable $v \in \mathbb{R}$ is passed to L-BFGS.  The chain rule gives
-$$
-\frac{\partial \mathcal{L}}{\partial v_k} = \frac{\partial \mathcal{L}}{\partial u_k}\,\sigma'(v_k),
-\qquad \sigma'(v) = u_k(1 - u_k).
-$$
+## Contact-Node Constraint {#sec-contact-mask}
 
-## Bound-Masking (Python)
+Nodes at which the gap field vanishes ($g_{i,j} = 0$, solid–solid contact) must carry
+$u_{i,j} = 0$: no liquid can occupy the contact region.  This is enforced by passing a
+Boolean mask `contact` of length $N_x N_y$ to the solver.  Such nodes satisfy $a_i = 0$
+automatically (because the FEM volume gradient weights by $g$), so they drop out of the
+linear equality constraint; the solver additionally holds $u_i = 0$ inside the projection
+step and zeroes the corresponding tangent-gradient component.
 
-The Python implementation uses gradient masking at active bounds (projected gradient):
-$$
-\left(\nabla_{\mathbf{u}} \mathcal{L}\right)_k =
-\begin{cases}
-0 & \text{if } u_k = 0 \text{ and } \partial \mathcal{L}/\partial u_k > 0, \\
-0 & \text{if } u_k = 1 \text{ and } \partial \mathcal{L}/\partial u_k < 0, \\
-\partial \mathcal{L}/\partial u_k & \text{otherwise.}
-\end{cases}
-$$
-The masked gradient is passed to `scipy.optimize.fmin_l_bfgs_b` (L-BFGS-B).
+Because the wetting density $2\sigma u$ and the $g$-weighted perimeter density both vanish
+pointwise where $u = 0$ and/or $g = 0$, the FEM quadrature with clamped contact values
+correctly integrates $I_\varepsilon$ over the open region $\{g > 0\}$ without any explicit
+indicator function in the energy functional itself.
+
+## Why Not Augmented Lagrangian?
+
+An earlier version of the code solved the volume constraint with an augmented-Lagrangian
+outer loop wrapped around an inner L-BFGS on a sigmoid reparametrisation $u = \sigma(v)$.
+That construction had two structural weaknesses for the linear-constraint case:
+
+1. **Redundancy.**  The augmented Lagrangian estimates the KKT multiplier $\lambda$ by
+   iterated $\lambda \leftarrow \lambda + c \cdot (V - V^*)$.  For a linear constraint the
+   exact multiplier is
+   $\lambda = \langle\mathbf{a},\nabla I\rangle / \langle\mathbf{a},\mathbf{a}\rangle$
+   and can be computed in one line at every step.  The outer iteration was spent
+   *estimating a quantity that has a closed form*.
+
+2. **Ill-conditioning.**  The quadratic penalty $(c/2)(V - V^*)^2$ adds a rank-1 Hessian
+   contribution $c\,\mathbf{a}\mathbf{a}^\top$.  As the outer loop ramps $c$ to force the
+   constraint, the inner problem's Hessian condition number grows as $c\,\|\mathbf{a}\|^2$
+   elongated along a single direction — the exact failure mode that breaks L-BFGS.
+   Combined with the sigmoid reparametrisation, which saturates to a zero-gradient dead
+   zone at the bounds, the solver could stall indefinitely on problems whose inner minimum
+   lies at a box face (e.g. hydrophilic wetting driving $u \to 1$ before the volume
+   penalty has built up).
+
+The projected-L-BFGS method avoids both issues: $\lambda$ is exact, $c$ does not exist,
+and the box constraint is handled by an explicit projection rather than a reparametrisation
+that kills its own gradient at the boundary.
 
 # Self-Affine Surface Roughness
 
 ## Power Spectral Density Model
 
-Self-affine (fractal) surfaces are characterized by a power-law power spectral density (PSD):
+Self-affine (fractal) surfaces are characterized by a power-law power spectral density (PSD)
+on an annulus $[q_\mathrm{min}, q_\mathrm{max}]$ in Fourier space:
 $$
-C(q) \propto q^{-2-2H}, \qquad q_\mathrm{min} \le q < q_\mathrm{max},
+C(q) \propto q^{-2(1+H)}, \qquad q_\mathrm{min} \le q \le q_\mathrm{max},
 $$
-where $H \in (0,1)$ is the Hurst exponent, $q = |\mathbf{q}|$ is the radial wavenumber, and
-$q_\mathrm{min} = 2\pi/L$, $q_\mathrm{max} = \pi N/L$ are the long- and short-wavelength cutoffs.
-Below $q_\mathrm{min}$ (rolloff region) the PSD is held constant.
+where $H \in (0,1)$ is the Hurst exponent and $q = |\mathbf{q}|$ is the radial wavenumber.
+The short-wavelength cutoff $q_\mathrm{max}$ defaults to the Nyquist value
+$\pi\,\min(N_x/L_x,\, N_y/L_y)$ but may be set by the user via a `short_cutoff` length.  The
+long-wavelength cutoff $q_\mathrm{min}$ is set by a user `long_cutoff`; when no
+`long_cutoff` is provided the synthesis uses the grid's natural minimum
+$q_\mathrm{min} = 2\pi\,\max(1/L_x,\, 1/L_y)$ and no rolloff region exists.
 
-The rms height and rms slope are related to the PSD by:
+When `long_cutoff` *is* specified, Fourier modes with $q < q_\mathrm{min}$ are set to a
+constant plateau of amplitude $r\, q_\mathrm{min}^{-(1+H)}$, where $r \in [0, 1]$ is a
+user-supplied `rolloff` scale ($r = 0$ suppresses the plateau entirely; $r = 1$ continues
+the PSD smoothly through $q_\mathrm{min}$).
+
+## Variance Integrals and Prefactor
+
+The analytical prefactor $A$ that matches a prescribed $h_\mathrm{rms}$ or slope
+$s_\mathrm{rms}$ must account for the plateau's contribution when $r > 0$.  Up to a common
+FFT-normalisation constant, integrating the power-law plus plateau PSD over the 2-D Fourier
+annulus gives
 $$
-h_\mathrm{rms}^2 = \int_{q_\mathrm{min}}^{q_\mathrm{max}} C(q)\,dq
-\propto q_\mathrm{min}^{-2H} - q_\mathrm{max}^{-2H},
-\qquad
-s_\mathrm{rms}^2 = \int_{q_\mathrm{min}}^{q_\mathrm{max}} q^2 C(q)\,dq
-\propto q_\mathrm{max}^{2-2H} - q_\mathrm{min}^{2-2H}.
+h_\mathrm{rms}^2 \;\propto\;
+\frac{1}{2H}\!\left[\,q_\mathrm{min}^{-2H}\bigl(1 + H r^2\bigr) - q_\mathrm{max}^{-2H}\right],
 $$
+$$
+s_\mathrm{rms}^2 \;\propto\;
+\frac{1}{2 - 2H}\!\left[\,q_\mathrm{max}^{2-2H} - q_\mathrm{min}^{2-2H}\!\left(1 - \frac{(1-H) r^2}{2}\right)\right].
+$$
+For $r = 0$ these reduce to the pure power-law expressions
+$q_\mathrm{min}^{-2H} - q_\mathrm{max}^{-2H}$ and
+$q_\mathrm{max}^{2-2H} - q_\mathrm{min}^{2-2H}$.  The prefactor is inverted from whichever
+target ($h_\mathrm{rms}$ or $s_\mathrm{rms}$) is supplied, so realisations preserve the
+requested rms *independent* of the rolloff choice.
 
 ## Fourier-Filtering Synthesis
 
-Given a prescribed rms height $h_\mathrm{rms}$ (or rms slope $s_\mathrm{rms}$), the prefactor
-$A$ is determined analytically from the integrals above.  A realization is then generated by:
+A realization is then generated by:
 
-1. Draw complex Fourier coefficients $\hat{h}(\mathbf{q}) = A\,\xi(\mathbf{q})\, q^{-(1+H)}$
-   where $\xi(\mathbf{q})$ are i.i.d. complex Gaussian random numbers with unit variance.
+1. Draw complex Fourier coefficients
+   $\hat{h}(\mathbf{q}) = A\,\xi(\mathbf{q})\, q^{-(1+H)}$ on the power-law region,
+   where $\xi(\mathbf{q})$ are i.i.d. random numbers with unit second moment.
 2. Zero out modes with $q > q_\mathrm{max}$ (anti-aliasing cutoff).
-3. Apply rolloff: for $q < q_\mathrm{min}$, replace the amplitude with the value at $q_\mathrm{min}$ (scaled by `rolloff` factor).
-4. Enforce Hermitian symmetry $\hat{h}(-\mathbf{q}) = \hat{h}(\mathbf{q})^*$ so that the inverse FFT is real.
+3. Apply rolloff: for $q < q_\mathrm{min}$, replace the amplitude with the plateau value
+   $r\,\xi(\mathbf{q})\, q_\mathrm{min}^{-(1+H)}$.
+4. Enforce Hermitian symmetry $\hat{h}(-\mathbf{q}) = \hat{h}(\mathbf{q})^*$ so that the
+   inverse FFT is real.
 5. Set the DC component ($\mathbf{q} = 0$) to zero (zero-mean surface).
 6. Compute the real-space surface $h(\mathbf{x}) = \mathrm{IFFT}[\hat{h}]$.
 
-The implementation uses a half-spectrum FFT (real-to-complex transform in $y$, complex-to-complex in $x$) via `irfft` / `ifft`.
+The implementation uses a half-spectrum FFT (real-to-complex transform in $y$,
+complex-to-complex in $x$) via `irfft` / `ifft`, and accepts a user-supplied RNG so
+multi-surface workflows (e.g. two independent roughness realisations for top and bottom
+plates) do not mutate the global RNG.
 
 # Summary of Key Parameters
 
 | Symbol | Meaning | Typical value |
 |--------|---------|---------------|
-| $l$ | Grid spacing | 0.01 |
-| $N_x = N_y$ | Grid size | 1024 |
-| $\varepsilon$ | Interface thickness | $\sim 3l$ |
+| $l_x,\, l_y$ | Grid spacings (often $l_x = l_y \equiv l$) | $0.01$ |
+| $N_x,\, N_y$ | Grid size | $1024$ |
+| $\varepsilon$ | Interface thickness | $\sim 3 l$ |
 | $\sigma = -\cos\theta$ | Adhesion coefficient | $[-1, 1]$ |
-| $z/l$ | Mean plate separation | 0.5–2.5 |
-| $H$ | Hurst exponent | 0.8 |
+| $z/l$ | Mean plate separation | $0.5$–$2.5$ |
+| $H$ | Hurst exponent | $0.8$ |
+| $r$ | Roughness rolloff scale | $0$ or $1$ |
 | $\beta_W$ | Double-well normalization constant | $1/3$ |
-| $c_0$ | Initial augmented-Lagrangian penalty | 10 |
-| $\tau_h$ | Volume-constraint tolerance | $10^{-7}$ |
+| $m$ | L-BFGS memory length | $10$ |
+| $g_\mathrm{tol}$ | KKT ∞-norm convergence tolerance | $10^{-5}$ |

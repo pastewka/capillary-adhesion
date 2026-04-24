@@ -38,10 +38,10 @@ The gap function $g(x)$ is defined as $g(x) = z + h_2(x) - h_1(x)$, where $z$ is
 md"## Parameters"
 
 # ╔═╡ 90918734-428b-931a-53b5-b4722c76bba1
-md"**Nx:** $(@bind Nx_slider Slider(64:64:512, default=128, show_value=true))"
+md"**Nx:** $(@bind Nx_slider Slider(64:64:512, default=64, show_value=true))"
 
 # ╔═╡ 90918734-8e34-5092-49d9-44b3f89015e2
-md"**Ny:** $(@bind Ny_slider Slider(64:64:512, default=128, show_value=true))"
+md"**Ny:** $(@bind Ny_slider Slider(64:64:512, default=64, show_value=true))"
 
 # ╔═╡ 90918734-833a-549b-8ae8-2e6abc2cc640
 md"**Contact angle θ (deg):** $(@bind θ_deg_slider Slider(0:5:180, default=60, show_value=true))"
@@ -67,6 +67,12 @@ md"**RMS height h_rms/l:** $(@bind h_rms_slider Slider(0.1:0.1:5.0, default=1.0,
 # ╔═╡ 90918734-b004-a372-c5f9-ff4e59955b27
 md"**Random seed:** $(@bind seed_slider Slider(1:100, default=42, show_value=true))"
 
+# ╔═╡ 90918734-b006-a372-c5f9-ff4e59955b27
+md"**Rolloff wavelength λ\_rolloff/l (0 = no rolloff):** $(@bind rolloff_wl_slider Slider(0:4:256, default=0, show_value=true))"
+
+# ╔═╡ 90918734-b007-a372-c5f9-ff4e59955b27
+md"**Short cutoff wavelength λ\_cutoff/l (0 = Nyquist):** $(@bind cutoff_wl_slider Slider(0:2:64, default=0, show_value=true))"
+
 # ╔═╡ 90918734-ecfb-5864-544e-78a7dd92be6b
 begin
     Nx = Nx_slider
@@ -82,27 +88,36 @@ begin
     Hurst = Hurst_slider
     h_rms = h_rms_slider * l
     seed  = seed_slider
-    
+    long_cutoff  = rolloff_wl_slider == 0 ? nothing : rolloff_wl_slider * l
+    short_cutoff = cutoff_wl_slider  == 0 ? nothing : cutoff_wl_slider  * l
+
     x_coords = ((1:Nx) .- 0.5) .* l
     y_coords = ((1:Ny) .- 0.5) .* l
-    
+
     sx = Nx * l
     sy = Ny * l
 
-    # Generate rough surfaces
-    Random.seed!(seed)
-    h1 = Roughness.fourier_synthesis(Nx, Ny, sx, sy, Hurst; rms_height=h_rms)
-    Random.seed!(seed + 1)
-    h2 = Roughness.fourier_synthesis(Nx, Ny, sx, sy, Hurst; rms_height=h_rms)
-    
+    # Generate rough surfaces. Use a single local MersenneTwister consumed
+    # sequentially — avoids mutating the global RNG and avoids the old
+    # `seed, seed+1` trick that coupled consecutive seeds (bumping `seed` by 1
+    # would make the new h1 equal to the old h2).
+    rng = MersenneTwister(seed)
+    h1 = Roughness.fourier_synthesis(Nx, Ny, sx, sy, Hurst; rms_height=h_rms,
+                                     long_cutoff=long_cutoff, short_cutoff=short_cutoff, rng=rng)
+    h2 = Roughness.fourier_synthesis(Nx, Ny, sx, sy, Hurst; rms_height=h_rms,
+                                     long_cutoff=long_cutoff, short_cutoff=short_cutoff, rng=rng)
+
     gap = z .+ h2 .- h1
     # Check for overlapping regions (negative gap)
     overlap = gap .< 0
     # Physical gap: must be non-negative
     gap = max.(gap, 0.0)
-    
+
+    rolloff_str = rolloff_wl_slider == 0 ? "none" : "$(rolloff_wl_slider)l"
+    cutoff_str  = cutoff_wl_slider  == 0 ? "Nyquist" : "$(cutoff_wl_slider)l"
     md"**Grid:** $(Nx) × $(Ny), spacing $l = $(l)$
     **Roughness:** $H = $(Hurst), h_{rms} = $(h_rms_slider)l$
+    **Cutoffs:** λ\_rolloff = $(rolloff_str), λ\_cutoff = $(cutoff_str)$
     **Separation:** $z = $(z_slider)l$
     **Overlapping regions:** $(sum(overlap)) pixels"
 end
@@ -128,25 +143,8 @@ begin
     vol_grad   = compute_volume_gradient(gap, l)
 
     # --- initial condition ---
-    function square_initial(Nx, Ny, l, ε, vol_fraction)
-        u = Matrix{Float64}(undef, Nx, Ny)
-        Lx = Nx * l
-        Ly = Ny * l
-        a = sqrt(vol_fraction * Lx * Ly)
-        xc = 0.5 * Lx
-        yc = 0.5 * Ly
-        for j in 1:Ny
-            y = (j - 0.5) * l
-            for i in 1:Nx
-                x = (i - 0.5) * l
-                ux = 0.5 * (tanh((x - (xc - a/2)) / ε) - tanh((x - (xc + a/2)) / ε))
-                uy = 0.5 * (tanh((y - (yc - a/2)) / ε) - tanh((y - (yc + a/2)) / ε))
-                u[i, j] = ux * uy
-            end
-        end
-        return vec(u)
-    end
-
+    # `square_initial` clamps interior to [0.02, 0.98] by default so the solver's
+    # sigmoid reparametrisation stays in its responsive band.
     u0 = square_initial(Nx, Ny, l, ε, vol_frac)
     md"Initial condition generated."
 end
@@ -154,25 +152,25 @@ end
 # ╔═╡ 90918734-996a-156f-184b-e181d9fa920d
 heatmap(x_coords, y_coords, reshape(u0, Nx, Ny)', aspect_ratio=:equal, title="Initial condition u0", color=:viridis, xlabel="x", ylabel="y")
 
-# ╔═╡ 90918734-cb42-33bf-a9fb-ad9acce69163
-@bind run_button Button("Run Simulation")
-
 # ╔═╡ 90918734-8fb9-c879-7ac6-40a15b93b0ca
 begin
-    run_button
-    
+    # Note: Pluto is reactive — moving any slider above re-runs the solver
+    # automatically. Keep Nx, Ny modest while exploring parameters.
+
     energy_fn(u)      = phase_field_energy(u, gap, ε, l, σ, C_σ)
     gradient_fn!(G,u) = phase_field_gradient!(G, u, gap, ε, l, σ, C_σ)
     volume_fn(u)      = compute_volume(u, gap, l)
 
-    u, λ_final = solve_volume_constrained(
+    g_tol_val = 1e-5
+
+    u, λ_final, residual = solve_volume_constrained(
         energy_fn, gradient_fn!, volume_fn, vol_grad, u0, vol_target;
-        contact = vec(overlap), tol_h = 1e-7, verbose = false)
+        contact = vec(overlap), g_tol = g_tol_val, verbose = false)
 
     V_fin = compute_volume(u, gap, l)
     E_fin = phase_field_energy(u, gap, ε, l, σ, C_σ)
     u_mat = reshape(u, Nx, Ny)
-    
+
     md"Simulation complete."
 end
 
@@ -215,6 +213,7 @@ begin
     - **Volume fraction:** $(@sprintf("%.6f", V_fin / vol_max)) (target $(vol_frac))
     - **Lagrange multiplier λ:** $(@sprintf("%.6e", λ_final)) (Laplace pressure)
     - **u range:** [$(round(minimum(u_mat), digits=4)), $(round(maximum(u_mat), digits=4))]
+    - **KKT residual ‖Gₚ‖∞:** $(@sprintf("%.6e", residual)) (tolerance $(@sprintf("%.0e", g_tol_val)))
     """
 end
 
@@ -232,12 +231,13 @@ end
 # ╠═90918734-b002-a372-c5f9-ff4e59955b27
 # ╠═90918734-b003-a372-c5f9-ff4e59955b27
 # ╠═90918734-b004-a372-c5f9-ff4e59955b27
+# ╠═90918734-b006-a372-c5f9-ff4e59955b27
+# ╠═90918734-b007-a372-c5f9-ff4e59955b27
 # ╟─90918734-ecfb-5864-544e-78a7dd92be6b
 # ╠═90918734-b005-a372-c5f9-ff4e59955b27
 # ╟─90918734-45fb-bd0e-3af2-4d74a2fa3d49
 # ╠═90918734-fd67-80d3-e37c-d7e7b295b2f4
 # ╠═90918734-996a-156f-184b-e181d9fa920d
-# ╠═90918734-cb42-33bf-a9fb-ad9acce69163
 # ╠═90918734-8fb9-c879-7ac6-40a15b93b0ca
 # ╟─90918734-76cd-dce5-8932-5f3f986f1f8c
 # ╠═90918734-e421-25ba-aefa-db0f7a0333b1

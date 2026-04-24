@@ -219,7 +219,7 @@ end
 
             u_opt, _ = solve_volume_constrained(
                 energy_fn, gradient_fn!, volume_fn, vgrad, u0, vtarget;
-                tol_h = 1e-6, verbose = false)
+                g_tol = 1e-6, verbose = false)
             u_2d = reshape(u_opt, N, N)
 
             # volume constraint satisfied
@@ -268,22 +268,30 @@ end
     gradient_fn!(G, u) = phase_field_gradient!(G, u, g, ε, lx, ly, σ, C_σ)
     volume_fn(u)       = compute_volume(u, g, lx, ly)
 
-    for (angle, label) in [(0, "0°"), (90, "90°"), (45, "45°"), (135, "135°")]
+    # Only the axis-aligned orientations (0°, 90°) are stable on an anisotropic
+    # grid: both give perimeter 2·Ly = 2·Lx = 2 (physical domain is square),
+    # while the diagonal (45°/135°) stripes have perimeter ≈ 2·√(Lx² + (Ly·lx/ly)²)
+    # = 2·√1.25 ≈ 2.24 — a strict-minimum-energy solver correctly escapes the
+    # diagonal metastable basin down to an axis-aligned stripe, blowing up the
+    # "width along the diagonal" measurement. The projected-L-BFGS solver does
+    # this; the previous augmented-Lagrangian solver happened to stall in the
+    # metastable basin, which the old test relied on. We therefore only test
+    # 0°/90° in the anisotropic case. (Isotropic 45°/135° remain below; there
+    # the diagonal has the same perimeter as axis-aligned, so it is stable.)
+    for (angle, label) in [(0, "0°"), (90, "90°")]
         @testset "$label stripe" begin
             u0 = vec(stripe_initial(Nx, Ny, angle, lx, ly, ε_init))
 
             u_opt, _ = solve_volume_constrained(
                 energy_fn, gradient_fn!, volume_fn, vgrad, u0, vtarget;
-                tol_h = 1e-6, verbose = false)
+                g_tol = 1e-6, verbose = false)
             u_2d = reshape(u_opt, Nx, Ny)
 
             @test isapprox(compute_volume(u_opt, g, lx, ly), vtarget, atol=1e-5)
 
             r, u_scan = perpendicular_scan(u_2d, lx, ly, angle)
             w = fit_sigmoid_width(r, u_scan)
-
-            rtol = angle == 135 ? 0.20 : 0.15
-            @test isapprox(w, ε, rtol=rtol)
+            @test isapprox(w, ε, rtol=0.15)
         end
     end
 end

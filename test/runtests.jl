@@ -1,7 +1,6 @@
 using PhaseField
 using Test
 using Random
-using Optim
 using Statistics
 
 @testset "PhaseField Model Tests" begin
@@ -192,7 +191,7 @@ using Statistics
 
         u_sol, λ_sol = solve_volume_constrained(
             energy_fn, gradient_fn!, volume_fn, vol_grad, u0, vol_target;
-            tol_h = 1e-6, verbose = false)
+            g_tol = 1e-6, verbose = false)
 
         V_sol = compute_volume(u_sol, g, l)
         @test isapprox(V_sol, vol_target, atol=1e-5)   # volume constraint satisfied
@@ -235,7 +234,7 @@ using Statistics
 
         u_sol, λ_sol = solve_volume_constrained(
             energy_fn, gradient_fn!, volume_fn, vol_grad, u0, vol_target;
-            tol_h = 1e-5, verbose = false)
+            g_tol = 1e-5, verbose = false)
 
         V_sol = compute_volume(u_sol, g, l)
         @test isapprox(V_sol, vol_target, atol=1e-4)
@@ -260,6 +259,27 @@ using Statistics
             Random.seed!(seed)
             h = Roughness.fourier_synthesis(64, 64, 1.0, 1.0, 0.8; rms_height=0.1)
             @test isapprox(mean(h), 0.0, atol=1e-12)
+        end
+    end
+
+    @testset "fourier_synthesis — rms_height preserved under rolloff" begin
+        # Regression test: when a long-wavelength plateau is applied (long_cutoff set),
+        # the prefactor must include the plateau's variance contribution so the target
+        # rms_height is preserved. Before the fix, rolloff=1 silently overshot the rms.
+        using Random: MersenneTwister
+        N          = 128
+        sx         = 1.0
+        H          = 0.8
+        target_rms = 0.1
+        for rolloff in (0.0, 0.5, 1.0)
+            samples = Float64[]
+            for seed in 1:30
+                h = Roughness.fourier_synthesis(N, N, sx, sx, H;
+                    rms_height=target_rms, long_cutoff=0.25,
+                    rolloff=rolloff, rng=MersenneTwister(seed))
+                push!(samples, std(h))
+            end
+            @test isapprox(mean(samples), target_rms, rtol=0.15)
         end
     end
 
@@ -306,7 +326,7 @@ using Statistics
 
                 u_sol, λ_sol = solve_volume_constrained(
                     energy_fn, gradient_fn!, volume_fn, vol_grad, u0, vol_target;
-                    contact = contact, tol_h = 1e-5, verbose = false)
+                    contact = contact, g_tol = 1e-5, verbose = false)
 
                 # Volume constraint satisfied over the open-gap region
                 @test isapprox(compute_volume(u_sol, g, l), vol_target, atol=1e-4)

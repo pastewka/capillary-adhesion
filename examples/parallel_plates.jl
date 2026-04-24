@@ -42,10 +42,10 @@ md"## Parameters
 All physical lengths in this simulation are expressed in terms of the grid spacing $l = 0.01$, which acts as the fundamental unit of length."
 
 # ╔═╡ 428b931a-53b5-b472-2c76-bba1b968cb97
-md"**Nx:** $(@bind Nx_slider Slider(64:64:1024, default=256, show_value=true))"
+md"**Nx:** $(@bind Nx_slider Slider(64:64:1024, default=64, show_value=true))"
 
 # ╔═╡ 8e345092-49d9-44b3-f890-15e23821d0e2
-md"**Ny:** $(@bind Ny_slider Slider(64:64:1024, default=256, show_value=true))"
+md"**Ny:** $(@bind Ny_slider Slider(64:64:1024, default=64, show_value=true))"
 
 # ╔═╡ 833a549b-8ae8-2e6a-bc2c-c640e0c30006
 md"**Contact angle θ (deg):** $(@bind θ_deg_slider Slider(0:5:180, default=60, show_value=true))"
@@ -90,30 +90,12 @@ begin
     vol_max    = z * Nx * Ny * l^2
     vol_target = vol_fraction_slider * vol_max
     gap        = fill(z, Nx, Ny)
-    vol_grad   = vec(gap) .* l^2
+    vol_grad   = compute_volume_gradient(gap, l)
 
     # --- initial condition ---
-    function square_initial(Nx, Ny, l, ε, vol_fraction)
-        u = Matrix{Float64}(undef, Nx, Ny)
-        Lx = Nx * l
-        Ly = Ny * l
-        # Area = vol_fraction * Lx * Ly
-        a = sqrt(vol_fraction * Lx * Ly)
-        xc = 0.5 * Lx
-        yc = 0.5 * Ly
-        for j in 1:Ny
-            y = (j - 0.5) * l
-            for i in 1:Nx
-                x = (i - 0.5) * l
-                # Smooth square: 1 inside, 0 outside
-                ux = 0.5 * (tanh((x - (xc - a/2)) / ε) - tanh((x - (xc + a/2)) / ε))
-                uy = 0.5 * (tanh((y - (yc - a/2)) / ε) - tanh((y - (yc + a/2)) / ε))
-                u[i, j] = ux * uy
-            end
-        end
-        return vec(u)
-    end
-
+    # `square_initial` clamps to [0.02, 0.98] by default so the solver's sigmoid
+    # reparametrisation stays in its responsive band (exact 0/1 maps to |v|≈23
+    # where the gradient is effectively zero).
     u0 = square_initial(Nx, Ny, l, ε, vol_fraction_slider)
     md"Initial condition (square droplet) generated."
 end
@@ -121,26 +103,33 @@ end
 # ╔═╡ 996a156f-184b-e181-d9fa-920d6d218f98
 heatmap(x_coords, y_coords, reshape(u0, Nx, Ny)', aspect_ratio=:equal, title="Initial condition u0", color=:viridis, xlabel="x", ylabel="y")
 
-# ╔═╡ cb4233bf-a9fb-ad9a-cce6-9163922ee12e
-@bind run_button Button("Run Simulation")
+# ╔═╡ a1b2c3d4-e5f6-a7b8-c9d0-e1f2a3b4c5d6
+md"### Solver Settings"
+
+# ╔═╡ a1b2c3d4-e5f6-a7b8-c9d0-e1f2a3b4c5d7
+md"**Max projected-L-BFGS iterations:** $(@bind max_iter_slider Slider(100:100:5000, default=500, show_value=true))"
 
 # ╔═╡ 8fb9c879-7ac6-40a1-5b93-b0ca50ad3e81
 begin
-    run_button
-    
+    # Note: Pluto is reactive — moving any slider above re-runs the solver
+    # automatically. Keep Nx, Ny modest while exploring parameters.
+
     energy_fn(u)      = phase_field_energy(u, gap, ε, l, σ, C_σ)
     gradient_fn!(G,u) = phase_field_gradient!(G, u, gap, ε, l, σ, C_σ)
     volume_fn(u)      = compute_volume(u, gap, l)
 
-    u, λ_final = solve_volume_constrained(
+    g_tol_val = 1e-5
+
+    u, λ_final, residual = solve_volume_constrained(
         energy_fn, gradient_fn!, volume_fn, vol_grad, u0, vol_target;
-        tol_h = 1e-7, verbose = false)
+        g_tol = g_tol_val, max_iter = max_iter_slider,
+        verbose = false)
 
     V_fin = compute_volume(u, gap, l)
     E_fin = phase_field_energy(u, gap, ε, l, σ, C_σ)
     u_mat = reshape(u, Nx, Ny)
-    
-    md"Simulation complete."
+
+    md"Simulation complete. λ = $(λ_final), residual = $(residual)"
 end
 
 # ╔═╡ 76cddce5-8932-5f3f-986f-1f8c2aa0c599
@@ -168,6 +157,7 @@ begin
     - **Volume fraction:** $(@sprintf("%.6f", V_fin / vol_max)) (target $(vol_fraction_slider))
     - **Lagrange multiplier λ:** $(@sprintf("%.6e", λ_final)) (Laplace pressure)
     - **u range:** [$(round(minimum(u_mat), digits=4)), $(round(maximum(u_mat), digits=4))]
+    - **KKT residual ‖Gₚ‖∞:** $(@sprintf("%.6e", residual)) (tolerance $(@sprintf("%.0e", g_tol_val)))
     """
 end
 
@@ -185,7 +175,8 @@ end
 # ╟─45fbbd0e-3af2-4d74-a2fa-3d49ec88a3fe
 # ╠═fd6780d3-e37c-d7e7-b295-b2f4130c02a9
 # ╠═996a156f-184b-e181-d9fa-920d6d218f98
-# ╠═cb4233bf-a9fb-ad9a-cce6-9163922ee12e
+# ╟─a1b2c3d4-e5f6-a7b8-c9d0-e1f2a3b4c5d6
+# ╠═a1b2c3d4-e5f6-a7b8-c9d0-e1f2a3b4c5d7
 # ╠═8fb9c879-7ac6-40a1-5b93-b0ca50ad3e81
 # ╟─76cddce5-8932-5f3f-986f-1f8c2aa0c599
 # ╠═e42125ba-aefa-db0f-7a03-33b13b846840
